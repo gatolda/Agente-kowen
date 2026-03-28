@@ -1,0 +1,19 @@
+# Credenciales y tokens - NUNCA subir estos archivos
+credentials.json
+token.json
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Sistema
+.DS_Store
+Thumbs.db
