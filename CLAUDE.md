@@ -12,7 +12,10 @@ Construir un agente en Python que orqueste la operacion del negocio:
 
 ## Integraciones
 - **Bsale** (ERP/POS): API REST `https://api.bsale.cl/v1/` — pendiente obtener token
-- **driv.in**: gestion de rutas y delivery — pendiente documentar API
+- **driv.in**: gestion de rutas y delivery — API documentada en `docs/drivin_api_reference.md`
+  - URL base: `https://external.driv.in/api/external/v2/`
+  - Auth: header `X-API-Key`
+  - Endpoints: scenarios, orders, routes, vehicles, users, schemas, pods, clients, GPS
 - **Google Sheets**: almacenamiento de datos (pedidos, pagos, etc.)
 - **Google Drive**: documentos del negocio
 - **Gmail**: procesamiento de emails (automatizado via n8n)

@@ -1,0 +1,33 @@
+name: Rutina Diaria Kowen
+
+on:
+  schedule:
+    # 8:00 AM hora Chile (UTC-4 en invierno, UTC-3 en verano)
+    # Usamos 11:00 UTC = 8:00 AM Chile (horario invierno CLT)
+    - cron: '0 11 * * *'
+  workflow_dispatch:  # Permite ejecutar manualmente desde GitHub
+
+jobs:
+  rutina:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar rutina diaria
+        env:
+          GOOGLE_SA_JSON: ${{ secrets.GOOGLE_SA_JSON }}
+          BSALE_API_TOKEN: ${{ secrets.BSALE_API_TOKEN }}
+          DRIVIN_API_KEY: ${{ secrets.DRIVIN_API_KEY }}
+          GOOGLE_SHEETS_KOWEN_ID: ${{ secrets.GOOGLE_SHEETS_KOWEN_ID }}
+        run: python scheduler.py
