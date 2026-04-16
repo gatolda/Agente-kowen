@@ -21,3 +21,13 @@ venv/
 # Sistema
 .DS_Store
 Thumbs.db
+
+# Datos locales (CSVs, HTMLs de prueba)
+*.csv
+*.html
+
+# Archivos legacy (codigo viejo reemplazado)
+legacy/
+
+# Claude Code memory (personal, no compartir)
+.claude/

@@ -47,6 +47,9 @@ def token_score(text_a, text_b):
 
 # --- Cache ---
 
+MEMORY_FILE = os.path.join(os.path.dirname(__file__), "match_memory.csv")
+
+
 def load_cache():
     """Carga las direcciones desde el CSV local."""
     if not os.path.exists(CACHE_FILE):
@@ -81,6 +84,62 @@ def refresh_cache():
     addresses = drivin_client.get_all_addresses()
     save_cache(addresses)
     return len(addresses)
+
+
+# --- Memoria de correcciones ---
+
+def load_memory():
+    """Carga la memoria de correcciones manuales de match."""
+    if not os.path.exists(MEMORY_FILE):
+        return {}
+
+    memory = {}
+    with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            key = normalize(row.get("direccion", ""))
+            memory[key] = {
+                "code": row.get("code", ""),
+                "direccion_original": row.get("direccion", ""),
+                "veces_usado": int(row.get("veces_usado", 1)),
+                "ultima_fecha": row.get("ultima_fecha", ""),
+            }
+    return memory
+
+
+def save_memory_entry(direccion, code):
+    """
+    Guarda o actualiza una correccion manual en la memoria.
+    La proxima vez que aparezca esta direccion, se usara este codigo directamente.
+    """
+    from datetime import datetime as _dt
+    memory = load_memory()
+    key = normalize(direccion)
+
+    if key in memory:
+        memory[key]["veces_usado"] += 1
+        memory[key]["code"] = code
+        memory[key]["ultima_fecha"] = _dt.now().strftime("%d/%m/%Y")
+    else:
+        memory[key] = {
+            "code": code,
+            "direccion_original": direccion,
+            "veces_usado": 1,
+            "ultima_fecha": _dt.now().strftime("%d/%m/%Y"),
+        }
+
+    # Escribir todo el archivo
+    fieldnames = ["direccion", "code", "veces_usado", "ultima_fecha"]
+    with open(MEMORY_FILE, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for k, v in memory.items():
+            writer.writerow({
+                "direccion": v["direccion_original"],
+                "code": v["code"],
+                "veces_usado": v["veces_usado"],
+                "ultima_fecha": v["ultima_fecha"],
+            })
 
 
 # --- Matching ---
@@ -174,10 +233,22 @@ def auto_match(direccion, depto="", comuna="", addresses=None):
     Intenta hacer match automatico. Retorna el codigo si es seguro,
     o None si necesita intervencion del usuario.
 
+    Primero busca en la memoria de correcciones manuales.
+    Si no encuentra, usa el algoritmo de matching normal.
+
     Returns:
-        (code, confidence) donde confidence es "auto", "ambiguous" o "none"
+        (code, confidence) donde confidence es "auto", "memory", "ambiguous" o "none"
         Si "ambiguous", code es la lista de candidatos.
     """
+    # Paso 0: Buscar en memoria de correcciones manuales
+    memory = load_memory()
+    full_addr = f"{direccion} {depto}".strip() if depto else direccion
+    mem_key = normalize(full_addr)
+    # Buscar match exacto o por direccion base
+    mem_entry = memory.get(mem_key) or memory.get(normalize(direccion))
+    if mem_entry and mem_entry.get("code"):
+        return mem_entry["code"], "memory"
+
     matches = find_matches(direccion, depto, comuna, addresses)
 
     if not matches:

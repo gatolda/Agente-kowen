@@ -5,13 +5,24 @@ Ejecutar: streamlit run app_streamlit.py
 """
 
 import os
+import shutil
 import streamlit as st
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 load_dotenv()
 
+# Limpiar cache corrupto de Streamlit (previene error "null bytes")
+_cache_dir = os.path.join(os.path.dirname(__file__), ".streamlit", "cache")
+if os.path.exists(_cache_dir):
+    try:
+        shutil.rmtree(_cache_dir)
+    except Exception:
+        pass
+
 import sheets_client
+import operations
+import log_client
 import bsale_client
 import drivin_client
 import address_matcher
@@ -180,6 +191,41 @@ with st.sidebar:
     st.markdown('<div class="sidebar-logo">KOWEN</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="sidebar-date">{datetime.now().strftime("%A %d / %B / %Y")}</div>', unsafe_allow_html=True)
 
+    # --- ARMAR RUTA DEL DIA ---
+    st.markdown("---")
+    if st.button("🚀  ARMAR RUTA DEL DÍA", key="btn_rutina", use_container_width=True, type="primary"):
+        with st.spinner("Ejecutando rutina diaria..."):
+            try:
+                resultado = operations.rutina_diaria()
+                lines = []
+                if resultado["entregados_ayer"] or resultado["movidos_a_hoy"]:
+                    lines.append(f"**Ayer ({resultado['fecha_ayer']}):**")
+                    lines.append(f"  Entregados: {resultado['entregados_ayer']}")
+                    lines.append(f"  Movidos a hoy: {resultado['movidos_a_hoy']}")
+                if resultado["bsale_importados"]:
+                    lines.append(f"Bsale: +{resultado['bsale_importados']} pedidos")
+                if resultado["planilla_importados"]:
+                    lines.append(f"Planilla: +{resultado['planilla_importados']} pedidos")
+                if resultado["codigos_asignados"]:
+                    lines.append(f"Códigos asignados: {resultado['codigos_asignados']}")
+                if resultado.get("drivin_subidos"):
+                    lines.append(f"driv.in: {resultado['drivin_subidos']} subidos al plan **{resultado.get('drivin_plan', '')}**")
+                    # Conectar al plan creado
+                    token = resultado.get("drivin_token", "")
+                    if token:
+                        st.session_state.scenario_token = token
+                        st.session_state.scenario_name = resultado.get("drivin_plan", "")
+                if resultado["errores"]:
+                    for err in resultado["errores"]:
+                        lines.append(f"⚠️ {err}")
+                if lines:
+                    st.success("\n\n".join(lines))
+                else:
+                    st.info("Sin cambios. Todo al día.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
     # --- Agregar pedido manual ---
     st.markdown("---")
     with st.expander("➕  Agregar pedido", expanded=False):
@@ -283,7 +329,7 @@ with st.sidebar:
                     orders = bsale_client.get_web_orders(since)
                     activos = [o for o in orders if o["estado"] == "activo"]
                     if activos:
-                        checked = sheets_client.check_bsale_orders(activos)
+                        checked = operations.check_bsale_orders(activos)
                         st.session_state["bsale_checked"] = checked
 
                         # Auto-matchear direcciones
@@ -351,11 +397,16 @@ with st.sidebar:
                     fecha_dest = bsale_fecha.strftime("%d/%m/%Y")
                     fecha_suffix = bsale_fecha.strftime("%m%d")
 
-                    # 1. Guardar en planilla
+                    # 1. Guardar en planilla + memoria de correcciones
                     pedidos_nuevos = []
                     for i, m in enumerate(matched):
                         o = m["order"]
                         code = bsale_codes.get(i, "")
+                        conf = m["confidence"]
+                        # Guardar en memoria si fue seleccion manual
+                        if conf in ("ambiguous", "none") and code:
+                            address_matcher.save_memory_entry(o.get("direccion", ""), code)
+                            log_client.log_match_manual(o.get("direccion", ""), code)
                         pedidos_nuevos.append({
                             "fecha": fecha_dest,
                             "direccion": o.get("direccion", ""),
@@ -536,7 +587,7 @@ with st.sidebar:
             if st.button("Importar pedidos de ruta", key="btn_imp_drivin", use_container_width=True):
                 with st.spinner("Importando desde driv.in..."):
                     try:
-                        count = sheets_client.import_from_drivin(imp_token, imp_fecha)
+                        count = operations.import_from_drivin(imp_token, imp_fecha)
                         if count > 0:
                             st.success(f"{count} pedidos importados!")
                             st.rerun()
@@ -554,12 +605,28 @@ with st.sidebar:
         if st.button("Importar PRIMER TURNO", key="btn_reparto", use_container_width=True):
             with st.spinner(f"Leyendo planilla reparto ({rep_fecha_str})..."):
                 try:
-                    count = sheets_client.sync_from_planilla_reparto(rep_fecha_str)
+                    count = operations.sync_from_planilla_reparto(rep_fecha_str)
                     if count > 0:
                         st.success(f"{count} pedidos importados!")
                         st.rerun()
                     else:
                         st.info("Sin pedidos nuevos para esa fecha.")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    # --- Importar desde Planilla Cactus ---
+    with st.expander("🌵  Importar desde Planilla Cactus", expanded=False):
+        cac_date = st.date_input("Fecha Cactus", value=datetime.now().date(), key="cac_date")
+        cac_fecha_str = cac_date.strftime("%d/%m/%Y")
+        if st.button("Importar Cactus", key="btn_cactus", use_container_width=True):
+            with st.spinner(f"Leyendo planilla Cactus ({cac_fecha_str})..."):
+                try:
+                    count = operations.sync_from_planilla_cactus(cac_fecha_str)
+                    if count > 0:
+                        st.success(f"{count} pedidos Cactus importados!")
+                        st.rerun()
+                    else:
+                        st.info("Sin pedidos Cactus nuevos para esa fecha.")
                 except Exception as e:
                     st.error(f"Error: {e}")
 
@@ -626,6 +693,17 @@ with st.sidebar:
                         st.session_state.scenario_name = ext_n
                         st.rerun()
 
+    # --- Alertas de errores recurrentes ---
+    try:
+        errores_rec = log_client.get_errores_recurrentes(dias=7)
+        if errores_rec:
+            st.markdown("---")
+            st.markdown('<p class="section-title">Alertas</p>', unsafe_allow_html=True)
+            for err in errores_rec:
+                st.warning(f"**{err['accion']}** — {err['conteo']}x en 7 dias. Ej: {err['ejemplo'][:60]}")
+    except Exception:
+        pass
+
     # --- Herramientas ---
     st.markdown("---")
     if st.button("🔄 Actualizar cache", use_container_width=True):
@@ -635,7 +713,7 @@ with st.sidebar:
             st.success(f"{count} direcciones.")
 
     st.markdown("---")
-    st.caption("Kowen v2.1 — Gestor de Pedidos")
+    st.caption("Kowen v2.2 — Gestor de Pedidos")
 
 
 # ============================================================
@@ -691,7 +769,7 @@ with main_col:
     if not pedidos:
         st.info(f"No hay pedidos para {fecha_str}. Usa el sidebar para agregar o importar.")
     else:
-        tab_vista, tab_editar, tab_drivin = st.tabs(["📋 Vista general", "✏️ Editar / Eliminar", "🚛 Subir a driv.in"])
+        tab_vista, tab_editar, tab_drivin, tab_verify = st.tabs(["📋 Vista general", "✏️ Editar / Eliminar", "🚛 Subir a driv.in", "🔍 Verificar driv.in"])
 
         # === VISTA ===
         with tab_vista:
@@ -847,105 +925,282 @@ with main_col:
                             st.session_state["confirm_delete"] = sel_num
                             st.rerun()
 
-        # === SUBIR A DRIV.IN ===
+        # === CODIGOS Y DRIV.IN ===
         with tab_drivin:
-            if not st.session_state.scenario_token:
-                st.warning("Conecta un plan en el sidebar primero.")
-            else:
-                st.info(f"Plan: **{st.session_state.scenario_name}**")
-                # Filtrar pedidos pendientes que NO tengan plan drivin asignado (evitar duplicados)
-                pendientes = [p for p in pedidos if p.get("Estado Pedido") == "PENDIENTE" and not p.get("Plan Drivin", "").strip()]
+            # Separar pedidos por estado de codigo
+            con_codigo = [p for p in pedidos if p.get("Codigo Drivin", "").strip()]
+            sin_codigo = [p for p in pedidos if not p.get("Codigo Drivin", "").strip()]
+            pendientes_subir = [p for p in con_codigo
+                                if p.get("Estado Pedido") == "PENDIENTE"
+                                and not p.get("Plan Drivin", "").strip()]
 
-                if not pendientes:
-                    st.success("No hay pedidos pendientes.")
-                else:
-                    st.write(f"**{len(pendientes)}** pedidos pendientes")
+            # --- Resumen rapido ---
+            rc1, rc2, rc3 = st.columns(3)
+            with rc1:
+                st.metric("Con codigo", len(con_codigo))
+            with rc2:
+                st.metric("Sin codigo", len(sin_codigo), delta=f"-{len(sin_codigo)}" if sin_codigo else None, delta_color="inverse")
+            with rc3:
+                st.metric("Listos para subir", len(pendientes_subir))
 
-                    if st.button("Matchear direcciones", key="btn_match"):
-                        if not st.session_state.addresses_cache:
-                            with st.spinner("Cargando cache..."):
-                                address_matcher.refresh_cache()
-                                st.session_state.addresses_cache = address_matcher.load_cache()
+            # === PASO 1: Asignar codigos ===
+            if sin_codigo:
+                st.markdown("### Paso 1: Asignar codigos")
+                st.caption("Estos pedidos no tienen codigo driv.in. Selecciona el correcto para cada uno.")
 
-                        matched = []
-                        for p in pendientes:
-                            result, confidence = address_matcher.auto_match(
-                                direccion=p.get("Direccion", ""),
-                                depto=p.get("Depto", ""),
-                                comuna=p.get("Comuna", ""),
-                                addresses=st.session_state.addresses_cache,
-                            )
-                            matched.append({"pedido": p, "result": result, "confidence": confidence})
-                        st.session_state["matched_drivin"] = matched
+                # Auto-matchear al cargar (sin boton)
+                if "matched_drivin" not in st.session_state or st.button("Volver a buscar", key="btn_rematch"):
+                    if not st.session_state.get("addresses_cache"):
+                        with st.spinner("Cargando direcciones..."):
+                            address_matcher.refresh_cache()
+                            st.session_state.addresses_cache = address_matcher.load_cache()
 
-                    if st.session_state.get("matched_drivin"):
-                        codes = {}
+                    matched = []
+                    for p in sin_codigo:
+                        result, confidence = address_matcher.auto_match(
+                            direccion=p.get("Direccion", ""),
+                            depto=p.get("Depto", ""),
+                            comuna=p.get("Comuna", ""),
+                            addresses=st.session_state.addresses_cache,
+                        )
+                        matched.append({"pedido": p, "result": result, "confidence": confidence})
+                    st.session_state["matched_drivin"] = matched
+
+                if st.session_state.get("matched_drivin"):
+                    codes = {}
+                    autos = [m for m in st.session_state["matched_drivin"] if m["confidence"] in ("auto", "memory")]
+                    ambiguos = [m for m in st.session_state["matched_drivin"] if m["confidence"] == "ambiguous"]
+                    sin_match = [m for m in st.session_state["matched_drivin"] if m["confidence"] == "none"]
+
+                    # --- Automaticos (resueltos) ---
+                    if autos:
+                        with st.expander(f"Resueltos automaticamente ({len(autos)})", expanded=False):
+                            for i, m in enumerate(st.session_state["matched_drivin"]):
+                                if m["confidence"] not in ("auto", "memory"):
+                                    continue
+                                p = m["pedido"]
+                                c1, c2, c3 = st.columns([4, 2, 1])
+                                with c1:
+                                    st.success(f"#{p.get('#', '')} {p.get('Direccion', '')} {p.get('Depto', '')}")
+                                with c2:
+                                    st.code(m["result"])
+                                    codes[i] = m["result"]
+                                with c3:
+                                    st.write(f"**{p.get('Cant', '')}** bot.")
+
+                    # --- Ambiguos (necesitan eleccion) ---
+                    if ambiguos:
+                        st.warning(f"**{len(ambiguos)} pedidos necesitan tu eleccion:**")
                         for i, m in enumerate(st.session_state["matched_drivin"]):
+                            if m["confidence"] != "ambiguous":
+                                continue
                             p = m["pedido"]
-                            conf = m["confidence"]
                             result = m["result"]
 
-                            c1, c2, c3 = st.columns([3, 2, 1])
-                            with c1:
-                                lbl = f"#{p.get('#', '')} | {p.get('Direccion', '')} {p.get('Depto', '')} | {p.get('Cliente', '')}"
-                                if conf == "auto":
-                                    st.success(lbl)
-                                elif conf == "ambiguous":
-                                    st.warning(lbl)
-                                else:
-                                    st.error(lbl)
-                            with c2:
-                                if conf == "auto":
-                                    st.code(result)
-                                    codes[i] = result
-                                elif conf == "ambiguous" and result:
-                                    opts = [f"{c.code} - {c.name}" for c in result]
-                                    s = st.selectbox("Cod", opts, key=f"sel_d_{i}", label_visibility="collapsed")
-                                    codes[i] = result[opts.index(s)].code
-                                else:
-                                    manual = st.text_input("Cod", key=f"man_d_{i}", label_visibility="collapsed", placeholder="Codigo...")
+                            st.markdown(f"**#{p.get('#', '')}** — {p.get('Direccion', '')} {p.get('Depto', '')} — {p.get('Cant', '')} bot.")
+                            if result:
+                                opts = ["-- Seleccionar --"] + [f"{c.code} — {c.name} ({c.address1})" for c in result]
+                                s = st.selectbox(
+                                    f"Codigo para #{p.get('#', '')}",
+                                    opts,
+                                    key=f"sel_d_{i}",
+                                    label_visibility="collapsed",
+                                )
+                                if s != "-- Seleccionar --":
+                                    idx = opts.index(s) - 1
+                                    codes[i] = result[idx].code
+                            else:
+                                manual = st.text_input(
+                                    f"Codigo para #{p.get('#', '')}",
+                                    key=f"man_d_{i}",
+                                    label_visibility="collapsed",
+                                    placeholder="Escribir codigo drivin...",
+                                )
+                                if manual:
                                     codes[i] = manual
-                            with c3:
-                                st.write(f"**{p.get('Cant', '')}** bot.")
 
-                        st.markdown("---")
-                        if st.button("🚀 Subir al plan", key="btn_subir", type="primary", use_container_width=True):
-                            clients = []
+                    # --- Sin match ---
+                    if sin_match:
+                        st.error(f"**{len(sin_match)} sin coincidencia** — escribe el codigo manualmente:")
+                        for i, m in enumerate(st.session_state["matched_drivin"]):
+                            if m["confidence"] != "none":
+                                continue
+                            p = m["pedido"]
+                            c1, c2 = st.columns([3, 2])
+                            with c1:
+                                st.write(f"#{p.get('#', '')} — {p.get('Direccion', '')} {p.get('Depto', '')} — {p.get('Cant', '')} bot.")
+                            with c2:
+                                manual = st.text_input(
+                                    f"Codigo para #{p.get('#', '')}",
+                                    key=f"man_d_{i}",
+                                    label_visibility="collapsed",
+                                    placeholder="Codigo drivin...",
+                                )
+                                if manual:
+                                    codes[i] = manual
+
+                    # --- Boton asignar codigos ---
+                    total_con_code = sum(1 for v in codes.values() if v)
+                    total_sin = len(st.session_state["matched_drivin"])
+                    st.markdown("---")
+
+                    if total_con_code > 0:
+                        if st.button(f"Guardar {total_con_code} codigos", key="btn_guardar_codes", type="primary", use_container_width=True):
                             updates_list = []
                             for i, m in enumerate(st.session_state["matched_drivin"]):
                                 code = codes.get(i, "")
                                 if not code:
                                     continue
                                 p = m["pedido"]
-                                marca = p.get("Marca", "KOWEN")
-                                cant = int(p.get("Cant", 0) or 0)
-                                desc = f"{marca} - Retiro" if cant == 0 else marca
-                                fecha_raw = p.get("Fecha", "")
-                                if "/" in fecha_raw:
-                                    parts = fecha_raw.split("/")
-                                    suffix = f"{parts[1]}{parts[0]}"
-                                else:
-                                    suffix = datetime.now().strftime("%m%d")
-                                clients.append({
-                                    "code": code,
-                                    "orders": [{"code": f"{code}-{suffix}", "description": desc, "units_1": cant}]
-                                })
-                                pn = int(p.get("#", 0))
-                                if pn:
-                                    updates_list.append((pn, {"codigo_drivin": code, "plan_drivin": st.session_state.scenario_name or ""}))
+                                conf = m["confidence"]
+                                pn = p.get("#", "")
+                                if pn and pn.isdigit():
+                                    updates_list.append((int(pn), {"codigo_drivin": code}))
+                                # Guardar en memoria si fue seleccion manual
+                                if conf in ("ambiguous", "none") and code:
+                                    address_matcher.save_memory_entry(p.get("Direccion", ""), code)
+                                    log_client.log_match_manual(p.get("Direccion", ""), code)
 
-                            if clients:
-                                with st.spinner("Subiendo..."):
-                                    try:
-                                        r = drivin_client.create_orders(clients=clients, scenario_token=st.session_state.scenario_token)
-                                        added = r.get("response", r).get("added", [])
-                                        if updates_list:
-                                            sheets_client.update_pedidos_batch(updates_list)
-                                        st.success(f"{len(added)} pedidos subidos!")
-                                        st.session_state.pop("matched_drivin", None)
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Error: {e}")
+                            if updates_list:
+                                sheets_client.update_pedidos_batch(updates_list)
+                                st.success(f"{len(updates_list)} codigos guardados!")
+                                st.session_state.pop("matched_drivin", None)
+                                st.rerun()
+                    else:
+                        st.info("Selecciona codigos arriba para poder guardarlos.")
+
+            # === PASO 2: Subir a driv.in ===
+            # Refrescar lista de pendientes para subir (puede haber cambiado tras asignar codigos)
+            if sin_codigo:
+                st.markdown("---")
+
+            st.markdown("### Paso 2: Subir a driv.in")
+
+            if not st.session_state.scenario_token:
+                st.caption("Conecta un plan en el sidebar o crea uno con el boton de arriba.")
+            else:
+                st.info(f"Plan activo: **{st.session_state.scenario_name}**")
+
+            # Pedidos con codigo, pendientes y sin plan
+            listos = [p for p in pedidos
+                      if p.get("Codigo Drivin", "").strip()
+                      and p.get("Estado Pedido") == "PENDIENTE"
+                      and not p.get("Plan Drivin", "").strip()]
+
+            if not listos:
+                if not sin_codigo:
+                    st.success("Todos los pedidos ya tienen plan asignado.")
+                else:
+                    st.caption("Asigna los codigos de arriba primero.")
+            else:
+                st.write(f"**{len(listos)} pedidos** listos para subir:")
+                for p in listos:
+                    st.write(f"  #{p.get('#','')} — {p.get('Direccion','')} {p.get('Depto','')} — {p.get('Cant','')} bot. — `{p.get('Codigo Drivin','')}`")
+
+                if st.session_state.scenario_token:
+                    if st.button(f"Subir {len(listos)} pedidos al plan", key="btn_subir", type="primary", use_container_width=True):
+                        clients = []
+                        updates_list = []
+                        for p in listos:
+                            code = p.get("Codigo Drivin", "")
+                            marca = p.get("Marca", "KOWEN")
+                            cant = int(p.get("Cant", 0) or 0)
+                            desc = f"{marca} - Retiro" if cant == 0 else marca
+                            fecha_raw = p.get("Fecha", "")
+                            if "/" in fecha_raw:
+                                parts = fecha_raw.split("/")
+                                suffix = f"{parts[1]}{parts[0]}"
+                            else:
+                                suffix = datetime.now().strftime("%m%d")
+                            clients.append({
+                                "code": code,
+                                "orders": [{"code": f"{code}-{suffix}", "description": desc, "units_1": cant}]
+                            })
+                            pn = p.get("#", "")
+                            if pn and pn.isdigit():
+                                updates_list.append((int(pn), {"plan_drivin": st.session_state.scenario_name or ""}))
+
+                        with st.spinner("Subiendo a driv.in..."):
+                            try:
+                                r = drivin_client.create_orders(clients=clients, scenario_token=st.session_state.scenario_token)
+                                added = r.get("response", r).get("added", [])
+                                if updates_list:
+                                    sheets_client.update_pedidos_batch(updates_list)
+                                st.success(f"{len(added)} pedidos subidos al plan!")
+                                st.session_state.pop("matched_drivin", None)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+
+        # === TAB VERIFICAR DRIV.IN ===
+        with tab_verify:
+            st.markdown("### Verificar estado real contra driv.in")
+            st.caption("Compara los pedidos PENDIENTE con la informacion real de driv.in (PODs, planes, rutas).")
+
+            if st.button("Verificar ahora", key="btn_verify", type="primary"):
+                with st.spinner("Consultando driv.in..."):
+                    try:
+                        verificacion = operations.verify_orders_drivin(
+                            fecha=fecha_str, days_back=7, auto_update=False
+                        )
+                        st.session_state["verificacion_result"] = verificacion
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+            if st.session_state.get("verificacion_result"):
+                v = st.session_state["verificacion_result"]
+
+                # Metricas
+                vc1, vc2, vc3, vc4 = st.columns(4)
+                with vc1:
+                    st.metric("Verificados", v["total_verificados"])
+                with vc2:
+                    st.metric("Entregados", v["entregados_detectados"],
+                              delta=f"+{v['entregados_detectados']}" if v["entregados_detectados"] else None)
+                with vc3:
+                    st.metric("No entregados", v["no_entregados_detectados"])
+                with vc4:
+                    st.metric("Estancados", len(v["estancados"]),
+                              delta=f"{len(v['estancados'])}" if v["estancados"] else None,
+                              delta_color="inverse")
+
+                # Planes sin despachar
+                if v["planes_sin_despachar"]:
+                    st.warning(f"**{len(v['planes_sin_despachar'])} planes creados pero NO despachados:**")
+                    for plan in v["planes_sin_despachar"]:
+                        st.write(f"  - **{plan['plan']}** — Estado: {plan['status']}")
+
+                # Cambios detectados
+                if v["detalle"]:
+                    st.success(f"**{len(v['detalle'])} cambios de estado detectados:**")
+                    for d in v["detalle"]:
+                        st.write(f"  #{d['numero']} {d['direccion']}: "
+                                 f"{d['estado_anterior']} → **{d['estado_nuevo']}** (fuente: {d['fuente']})")
+
+                    if st.button("Aplicar cambios", key="btn_apply_verify", type="primary"):
+                        with st.spinner("Actualizando..."):
+                            try:
+                                result = operations.verify_orders_drivin(
+                                    fecha=fecha_str, days_back=7, auto_update=True
+                                )
+                                st.success(f"{result['actualizados']} pedidos actualizados!")
+                                st.session_state.pop("verificacion_result", None)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+                elif v["total_verificados"] > 0:
+                    st.info("No se detectaron cambios de estado. Todo al dia.")
+
+                # Pedidos estancados
+                if v["estancados"]:
+                    st.markdown("---")
+                    st.error(f"**{len(v['estancados'])} pedidos estancados** (PENDIENTE por mas de 2 dias sin actividad en driv.in):")
+                    for e in v["estancados"]:
+                        st.write(f"  #{e['numero']} — {e['direccion']} — "
+                                 f"Desde {e['fecha']} ({e['dias']} dias) — "
+                                 f"Codigo: {e['codigo'] or 'sin codigo'} — Plan: {e['plan'] or 'sin plan'}")
+
+                    st.caption("Estos pedidos probablemente necesitan reprogramarse o verificarse manualmente.")
 
 
 # === CHAT CON IA (columna derecha) ===
@@ -1076,7 +1331,7 @@ def _execute_tool(tool_name, tool_input, current_pedidos, current_fecha):
 
     elif tool_name == "resumen_dia":
         fecha = tool_input.get("fecha", current_fecha)
-        r = sheets_client.resumen_dia(fecha)
+        r = operations.resumen_dia(fecha)
         return json.dumps(r, ensure_ascii=False, indent=2)
 
     return "Herramienta no reconocida."
@@ -1277,7 +1532,7 @@ with tab_sync:
         if st.button("Sincronizar desde driv.in", key="btn_sync", type="primary", use_container_width=True):
             with st.spinner("Sincronizando..."):
                 try:
-                    count = sheets_client.sync_from_drivin(
+                    count = operations.sync_from_drivin(
                         fecha=sync_fecha,
                         plan_name=st.session_state.scenario_name or "",
                     )
@@ -1298,7 +1553,7 @@ with tab_sync:
         if st.button("Sincronizar hacia planilla reparto", key="btn_sync_reparto", type="primary", use_container_width=True):
             with st.spinner("Sincronizando..."):
                 try:
-                    count = sheets_client.sync_to_planilla_reparto(sync2_fecha)
+                    count = operations.sync_to_planilla_reparto(sync2_fecha)
                     if count > 0:
                         st.success(f"{count} pedidos sincronizados a planilla reparto!")
                     else:

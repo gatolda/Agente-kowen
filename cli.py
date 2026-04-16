@@ -1,6 +1,6 @@
 """
 CLI interactivo para Agente Kowen.
-Gestiona pedidos, planes y rutas sin consumir tokens de IA.
+Gestiona pedidos, planes y rutas conectado a Google Sheets.
 """
 
 import os
@@ -10,6 +10,9 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 load_dotenv()
 
+import sheets_client
+import operations
+import log_client
 import bsale_client
 import drivin_client
 import address_matcher
@@ -44,12 +47,57 @@ def pause():
     input("\nPresione Enter para continuar...")
 
 
-# === OPCION 1: Consultar pedidos web ===
+# === OPCION 1: Ver pedidos de hoy ===
+
+def ver_pedidos_hoy():
+    print("\n--- Pedidos de hoy ---\n")
+
+    fecha = datetime.now().strftime("%d/%m/%Y")
+    otra = input(f"Fecha [{fecha}]: ").strip()
+    if otra:
+        fecha = otra
+
+    pedidos = sheets_client.get_pedidos(fecha)
+
+    if not pedidos:
+        print(f"No hay pedidos para {fecha}.")
+        return
+
+    # Conteos
+    pendientes = [p for p in pedidos if p.get("Estado Pedido") == "PENDIENTE"]
+    en_camino = [p for p in pedidos if p.get("Estado Pedido") == "EN CAMINO"]
+    entregados = [p for p in pedidos if p.get("Estado Pedido") == "ENTREGADO"]
+    no_entregados = [p for p in pedidos if p.get("Estado Pedido") == "NO ENTREGADO"]
+
+    print(f"  Total: {len(pedidos)} | Pendientes: {len(pendientes)} | "
+          f"En camino: {len(en_camino)} | Entregados: {len(entregados)} | "
+          f"No entregados: {len(no_entregados)}\n")
+
+    print(f"{'#':<4} {'Direccion':<35} {'Depto':<10} {'Cant':>4} {'Marca':<8} {'Estado':<14} {'Codigo':<12} {'Repartidor'}")
+    print("-" * 120)
+
+    for p in pedidos:
+        nro = p.get("#", "")
+        dir_short = p.get("Direccion", "")[:33]
+        depto = p.get("Depto", "")[:8]
+        cant = p.get("Cant", "")
+        marca = p.get("Marca", "")[:6]
+        estado = p.get("Estado Pedido", "")[:12]
+        codigo = p.get("Codigo Drivin", "")[:10]
+        rep = p.get("Repartidor", "")[:15]
+        print(f"{nro:<4} {dir_short:<35} {depto:<10} {cant:>4} {marca:<8} {estado:<14} {codigo:<12} {rep}")
+
+
+# === OPCION 2: Consultar pedidos web ===
 
 def consultar_pedidos():
     print("\n--- Consultar pedidos web (Bsale) ---\n")
 
-    default = 3483
+    # Obtener ultimo Bsale del sistema
+    all_pedidos = sheets_client.get_pedidos()
+    bsale_nums = [int(p.get("Pedido Bsale", "0") or "0") for p in all_pedidos]
+    default = max(bsale_nums) if bsale_nums else 3483
+
     since = input(f"Desde que numero de pedido? [{default}]: ").strip()
     since_number = int(since) if since else default
 
@@ -65,37 +113,45 @@ def consultar_pedidos():
         print("No se encontraron pedidos nuevos.")
         return
 
-    # Filtrar activos y anulados
     activos = [o for o in orders if o["estado"] == "activo"]
     anulados = [o for o in orders if o["estado"] == "anulado"]
 
-    print(f"{'Nro':<6} {'Fecha':<12} {'Cliente':<25} {'Direccion':<35} {'Cant':>4} {'Total':>8} {'Marca':<8} {'Estado'}")
-    print("-" * 120)
+    # Verificar duplicados contra el sistema
+    checked = operations.check_bsale_orders(activos)
+    nuevos = [o for o in checked if not o["existe"]]
+    existentes = [o for o in checked if o["existe"]]
 
-    for o in orders:
+    print(f"{'Nro':<6} {'Fecha':<12} {'Cliente':<25} {'Direccion':<35} {'Cant':>4} {'Marca':<8} {'Estado'}")
+    print("-" * 100)
+
+    for o in checked:
         dir_display = o["direccion"][:33]
         if o["depto"]:
             dir_display = f"{o['direccion'][:25]} {o['depto']}"
-        cliente = o["cliente"][:23] if o["cliente"] else ""
-        estado = o["estado"].upper()
-        print(f"#{o['pedido_nro']:<5} {o['fecha']:<12} {cliente:<25} {dir_display:<35} {int(o['cantidad']):>4} ${o['total']:>7,} {o['marca']:<8} {estado}")
+        cliente = o.get("cliente", "")[:23]
+        flag = "EXISTE" if o["existe"] else "NUEVO"
+        print(f"#{o['pedido_nro']:<5} {o['fecha']:<12} {cliente:<25} {dir_display:<35} {int(o['cantidad']):>4} {o['marca']:<8} {flag}")
 
-    print(f"\nTotal: {len(activos)} activos, {len(anulados)} anulados")
+    print(f"\nTotal: {len(nuevos)} nuevos, {len(existentes)} ya existen, {len(anulados)} anulados")
 
     session["orders"] = activos
 
-    if activos:
-        resp = input("\nDesea subir los pedidos activos a un plan? (s/n): ").strip().lower()
+    if nuevos:
+        resp = input(f"\nImportar {len(nuevos)} pedidos nuevos a la planilla? (s/n): ").strip().lower()
         if resp == "s":
-            subir_pedidos()
+            count = operations.sync_from_bsale(activos)
+            print(f"\n{count} pedidos importados a la planilla.")
+
+            resp2 = input("Subir tambien a un plan de driv.in? (s/n): ").strip().lower()
+            if resp2 == "s":
+                subir_pedidos()
 
 
-# === OPCION 2: Crear plan del dia ===
+# === OPCION 3: Crear plan del dia ===
 
 def crear_plan():
     print("\n--- Crear plan del dia (driv.in) ---\n")
 
-    # Fecha
     today = datetime.now().strftime("%Y-%m-%d")
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
     print(f"  1. Hoy ({today})")
@@ -110,7 +166,6 @@ def crear_plan():
     else:
         date = input("Ingrese fecha (YYYY-MM-DD): ").strip()
 
-    # Nombre
     date_display = datetime.strptime(date, "%Y-%m-%d").strftime("%d/%m/%Y")
     default_name = f"{date_display}API"
     name = input(f"Nombre del plan [{default_name}]: ").strip() or default_name
@@ -121,54 +176,28 @@ def crear_plan():
         result = drivin_client.create_scenario(
             description=name,
             date=date,
-            schema_code=None,
             clients=[],
         )
-        # create_scenario envia schema_code=None, pero la API usa schema_name
-        # Re-intentar con schema_name
-    except Exception:
-        pass
-
-    try:
-        from drivin_client import _request, _get_headers
-        body = {
-            "description": name,
-            "date": date,
-            "schema_name": "Optimización",
-            "clients": [],
-        }
-        result = _request("POST", "scenarios", json_body=body)
         response = result.get("response", result)
         token = response.get("scenario_token", "")
-        vehicles = response.get("vehicles_count", 0)
 
         session["scenario_token"] = token
         session["scenario_name"] = name
 
         print(f"\nPlan creado exitosamente!")
         print(f"  Token: {token}")
-        print(f"  Vehiculos: {vehicles}")
 
     except Exception as e:
         print(f"Error al crear plan: {e}")
 
 
-# === OPCION 3: Subir pedidos a un plan ===
+# === OPCION 4: Subir pedidos a un plan ===
 
 def subir_pedidos():
     print("\n--- Subir pedidos a un plan (driv.in) ---\n")
 
-    # Verificar que hay pedidos cargados
-    if not session["orders"]:
-        print("No hay pedidos cargados. Use la opcion 1 primero.")
-        resp = input("Desea consultar pedidos ahora? (s/n): ").strip().lower()
-        if resp == "s":
-            consultar_pedidos()
-        return
-
-    # Verificar plan activo
     if not session["scenario_token"]:
-        print("No hay plan activo. Use la opcion 2 primero o ingrese un token.")
+        print("No hay plan activo. Use la opcion 3 primero o ingrese un token.")
         token = input("Token del escenario (o Enter para crear uno nuevo): ").strip()
         if token:
             session["scenario_token"] = token
@@ -178,58 +207,83 @@ def subir_pedidos():
             if not session["scenario_token"]:
                 return
 
+    # Cargar pedidos de hoy sin codigo asignado en drivin
+    fecha = datetime.now().strftime("%d/%m/%Y")
+    pedidos = sheets_client.get_pedidos(fecha)
+    pendientes = [p for p in pedidos
+                  if p.get("Estado Pedido") == "PENDIENTE"
+                  and not p.get("Plan Drivin", "").strip()]
+
+    if not pendientes:
+        print("No hay pedidos pendientes sin plan para hoy.")
+        return
+
     # Cargar cache de direcciones
     print("Cargando direcciones de driv.in...")
     if session["addresses_cache"] is None:
         session["addresses_cache"] = address_matcher.load_cache()
         if not session["addresses_cache"]:
             print("Cache vacio. Descargando direcciones...")
-            count = address_matcher.refresh_cache()
+            address_matcher.refresh_cache()
             session["addresses_cache"] = address_matcher.load_cache()
-            print(f"  {count} direcciones cargadas.")
 
-    print(f"\nMatcheando {len(session['orders'])} pedidos...\n")
+    print(f"\nMatcheando {len(pendientes)} pedidos...\n")
 
-    # Matchear cada pedido
     clients_to_upload = []
     skipped = []
+    updates = []
 
-    for order in session["orders"]:
-        code = address_matcher.match_order_interactive(
-            direccion=order["direccion"],
-            depto=order["depto"],
-            comuna=order["comuna"],
-            addresses=session["addresses_cache"],
-        )
+    date_suffix = datetime.now().strftime("%m%d")
 
-        if not code:
-            skipped.append(order)
+    for p in pendientes:
+        nro = p.get("#", "")
+        direccion = p.get("Direccion", "")
+        depto = p.get("Depto", "")
+        comuna = p.get("Comuna", "")
+        codigo = p.get("Codigo Drivin", "").strip()
+
+        if not codigo:
+            code, confidence = address_matcher.auto_match(
+                direccion, depto, comuna, session["addresses_cache"]
+            )
+            if confidence in ("auto", "memory") and code:
+                codigo = code
+                updates.append((int(nro), {"codigo_drivin": code}))
+            elif confidence == "ambiguous":
+                # Matching interactivo
+                code = address_matcher.match_order_interactive(
+                    direccion, depto, comuna, session["addresses_cache"]
+                )
+                if code:
+                    codigo = code
+                    updates.append((int(nro), {"codigo_drivin": code}))
+                    address_matcher.save_memory_entry(direccion, code)
+                    log_client.log_match_manual(direccion, code)
+
+        if not codigo:
+            skipped.append(p)
+            print(f"  SKIP: {direccion} {depto} (sin codigo)")
             continue
 
-        # Determinar descripcion
-        marca = order.get("marca", "Kowen")
-        if order["cantidad"] == 0:
-            description = f"{marca} - Retiro"
-        else:
-            description = marca
-
-        date_suffix = order["fecha"].replace("-", "")[4:]  # MMDD
-        order_code = f"{code}-{date_suffix}"
+        marca = p.get("Marca", "KOWEN")
+        cant = int(p.get("Cant", 0) or 0)
+        desc = f"{marca} - Retiro" if cant == 0 else marca
+        order_code = f"{codigo}-{date_suffix}"
 
         clients_to_upload.append({
-            "code": code,
-            "orders": [{
-                "code": order_code,
-                "description": description,
-                "units_1": int(order["cantidad"]),
-            }]
+            "code": codigo,
+            "orders": [{"code": order_code, "description": desc, "units_1": cant}]
         })
+        print(f"  OK: {direccion} -> {codigo}")
+
+    # Guardar codigos asignados
+    if updates:
+        sheets_client.update_pedidos_batch(updates)
 
     if not clients_to_upload:
         print("\nNo hay pedidos para subir.")
         return
 
-    # Confirmar
     print(f"\n{'=' * 40}")
     print(f"Resumen: {len(clients_to_upload)} pedidos a subir, {len(skipped)} omitidos")
     print(f"Plan: {session['scenario_name']}")
@@ -239,7 +293,6 @@ def subir_pedidos():
         print("Subida cancelada.")
         return
 
-    # Subir
     try:
         result = drivin_client.create_orders(
             clients=clients_to_upload,
@@ -247,22 +300,23 @@ def subir_pedidos():
         )
         response = result.get("response", result)
         added = response.get("added", [])
-        skipped_api = response.get("skipped", [])
-        print(f"\nSubida exitosa!")
-        print(f"  Agregados: {len(added)}")
-        if skipped_api:
-            print(f"  Omitidos por API: {len(skipped_api)}")
+        print(f"\nSubida exitosa! {len(added)} pedidos agregados.")
 
-        # Preguntar si asignar conductor
-        resp = input("\nDesea asignar conductor a estos pedidos? (s/n): ").strip().lower()
-        if resp == "s":
-            asignar_conductor_pedidos(clients_to_upload)
+        # Marcar plan en la planilla
+        plan_updates = []
+        for p in pendientes:
+            nro = p.get("#", "")
+            codigo = p.get("Codigo Drivin", "").strip()
+            if nro and nro.isdigit() and codigo:
+                plan_updates.append((int(nro), {"plan_drivin": session["scenario_name"]}))
+        if plan_updates:
+            sheets_client.update_pedidos_batch(plan_updates)
 
     except Exception as e:
         print(f"Error al subir pedidos: {e}")
 
 
-# === OPCION 4: Asignar conductor ===
+# === OPCION 5: Asignar conductor ===
 
 def asignar_conductor():
     print("\n--- Asignar conductor a ruta ---\n")
@@ -274,12 +328,11 @@ def asignar_conductor():
             return
         session["scenario_token"] = token
 
-    # Listar conductores y vehiculos
     try:
         vehicles_data = drivin_client.get_vehicles()
         vehicles = vehicles_data.get("response", [])
 
-        print("Vehiculos y conductores disponibles:\n")
+        print("Vehiculos disponibles:\n")
         for i, v in enumerate(vehicles, 1):
             driver = v.get("driver", {})
             driver_name = f"{driver.get('first_name', '')} {driver.get('last_name', '')}".strip() if driver else "Sin conductor"
@@ -291,84 +344,33 @@ def asignar_conductor():
             return
 
         vehicle = vehicles[int(choice) - 1]
-        vehicle_code = vehicle["code"]
 
-        # Obtener pedidos no asignados
-        try:
-            unassigned = drivin_client.get_unassigned(session["scenario_token"])
-            ua_orders = unassigned.get("response", [])
-            if ua_orders:
-                print(f"\nPedidos sin asignar: {len(ua_orders)}")
-                confirm = input(f"Asignar todos al vehiculo {vehicle_code}? (s/n): ").strip().lower()
-                if confirm == "s":
-                    # Construir clients para la ruta
-                    clients = []
-                    for order in ua_orders:
-                        clients.append({
-                            "code": order.get("address_code", order.get("code", "")),
-                            "orders": [{
-                                "code": order.get("order_code", order.get("code", "")),
-                                "description": order.get("description", "Kowen"),
-                                "units_1": order.get("units_1", 0),
-                            }]
-                        })
-                    result = drivin_client.create_route(vehicle_code, clients, session["scenario_token"])
-                    print("Ruta creada exitosamente!")
-            else:
-                print("No hay pedidos sin asignar.")
-        except Exception as e:
-            print(f"Error al obtener pedidos no asignados: {e}")
+        unassigned = drivin_client.get_unassigned(session["scenario_token"])
+        ua_orders = unassigned.get("response", [])
+        if ua_orders:
+            print(f"\nPedidos sin asignar: {len(ua_orders)}")
+            confirm = input(f"Asignar todos al vehiculo {vehicle['code']}? (s/n): ").strip().lower()
+            if confirm == "s":
+                clients = []
+                for order in ua_orders:
+                    clients.append({
+                        "code": order.get("address_code", order.get("code", "")),
+                        "orders": [{
+                            "code": order.get("order_code", order.get("code", "")),
+                            "description": order.get("description", "Kowen"),
+                            "units_1": order.get("units_1", 0),
+                        }]
+                    })
+                drivin_client.create_route(vehicle["code"], clients, session["scenario_token"])
+                print("Ruta creada exitosamente!")
+        else:
+            print("No hay pedidos sin asignar.")
 
     except Exception as e:
         print(f"Error: {e}")
 
 
-def asignar_conductor_pedidos(clients):
-    """Asigna una lista de pedidos ya preparados a un conductor."""
-    try:
-        vehicles_data = drivin_client.get_vehicles()
-        vehicles = vehicles_data.get("response", [])
-
-        print("\nVehiculos disponibles:\n")
-        for i, v in enumerate(vehicles, 1):
-            driver = v.get("driver", {})
-            driver_name = f"{driver.get('first_name', '')} {driver.get('last_name', '')}".strip() if driver else "Sin conductor"
-            print(f"  {i}. {v['code']} ({v.get('model', '')}) - {driver_name}")
-
-        choice = input(f"\nElija vehiculo (1-{len(vehicles)}): ").strip()
-        if not choice.isdigit() or not (1 <= int(choice) <= len(vehicles)):
-            print("Opcion invalida.")
-            return
-
-        vehicle = vehicles[int(choice) - 1]
-
-        # Preguntar si todos o seleccionar
-        all_orders = input("Asignar todos los pedidos a este vehiculo? (s/n): ").strip().lower()
-
-        if all_orders == "s":
-            selected = clients
-        else:
-            print("\nSeleccione pedidos (numeros separados por coma):")
-            for i, c in enumerate(clients, 1):
-                print(f"  {i}. {c['code']}")
-            sel = input("Pedidos: ").strip()
-            indices = [int(x.strip()) - 1 for x in sel.split(",") if x.strip().isdigit()]
-            selected = [clients[i] for i in indices if 0 <= i < len(clients)]
-
-        if not selected:
-            print("No se seleccionaron pedidos.")
-            return
-
-        result = drivin_client.create_route(
-            vehicle["code"], selected, session["scenario_token"]
-        )
-        print(f"\nRuta creada! {len(selected)} pedidos asignados a {vehicle['code']}.")
-
-    except Exception as e:
-        print(f"Error al asignar conductor: {e}")
-
-
-# === OPCION 5: Ver estado de rutas ===
+# === OPCION 6: Ver estado de rutas ===
 
 def ver_estado():
     print("\n--- Estado de rutas ---\n")
@@ -407,7 +409,128 @@ def ver_estado():
         print(f"Error: {e}")
 
 
-# === OPCION 6: Actualizar cache ===
+# === OPCION 7: Importar planilla reparto ===
+
+def importar_planilla():
+    print("\n--- Importar desde planilla reparto ---\n")
+
+    fecha = datetime.now().strftime("%d/%m/%Y")
+    otra = input(f"Fecha [{fecha}]: ").strip()
+    if otra:
+        fecha = otra
+
+    print(f"Importando pedidos de planilla reparto ({fecha})...")
+
+    try:
+        count = operations.sync_from_planilla_reparto(fecha)
+        print(f"\n{count} pedidos importados.")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+# === OPCION 8: Ejecutar rutina diaria ===
+
+def ejecutar_rutina():
+    print("\n--- Ejecutar rutina diaria ---\n")
+
+    fecha = datetime.now().strftime("%d/%m/%Y")
+    print(f"Ejecutando rutina para {fecha}...")
+    print("(Revisa ayer, importa nuevos, asigna codigos, sube a driv.in)\n")
+
+    try:
+        resultado = operations.rutina_diaria(fecha_hoy=fecha)
+
+        print(f"Pedidos de ayer ({resultado['fecha_ayer']}):")
+        print(f"  Entregados: {resultado['entregados_ayer']}")
+        print(f"  No entregados: {resultado['no_entregados_ayer']}")
+        print(f"  Movidos a hoy: {resultado['movidos_a_hoy']}")
+        print(f"  Duplicados eliminados: {resultado['duplicados_eliminados']}")
+        print(f"\nImportaciones de hoy:")
+        print(f"  Desde Bsale: {resultado['bsale_importados']}")
+        print(f"  Desde planilla: {resultado['planilla_importados']}")
+        print(f"  Codigos asignados: {resultado['codigos_asignados']}")
+        print(f"\nPlan driv.in:")
+        print(f"  Plan: {resultado.get('drivin_plan', 'N/A')}")
+        print(f"  Subidos: {resultado.get('drivin_subidos', 0)}")
+
+        if resultado["errores"]:
+            print(f"\nAdvertencias:")
+            for err in resultado["errores"]:
+                print(f"  - {err}")
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+# === OPCION 9: Resumen del dia ===
+
+def resumen():
+    print("\n--- Resumen del dia ---\n")
+
+    fecha = datetime.now().strftime("%d/%m/%Y")
+    otra = input(f"Fecha [{fecha}]: ").strip()
+    if otra:
+        fecha = otra
+
+    r = operations.resumen_dia(fecha)
+
+    print(f"  Fecha: {r['fecha']}")
+    print(f"  Total pedidos: {r['total_pedidos']}")
+    print(f"  Botellones: {r['total_botellones']}")
+    print(f"  Entregados: {r['entregados']}")
+    print(f"  Pendientes: {r['pendientes']}")
+    print(f"  En camino: {r['en_camino']}")
+    print(f"  No entregados: {r['no_entregados']}")
+    print(f"  Pagados: {r['pagados']}")
+    print(f"  Por cobrar: {r['por_cobrar']}")
+
+
+# === OPCION V: Verificar contra driv.in ===
+
+def verificar_drivin():
+    print("\n--- Verificar pedidos contra driv.in ---\n")
+
+    fecha = datetime.now().strftime("%d/%m/%Y")
+    otra = input(f"Fecha [{fecha}]: ").strip()
+    if otra:
+        fecha = otra
+
+    print("Consultando driv.in...")
+    try:
+        v = operations.verify_orders_drivin(fecha=fecha, auto_update=False)
+        print(f"\nVerificados: {v['total_verificados']}")
+        print(f"Entregados detectados: {v['entregados_detectados']}")
+        print(f"No entregados detectados: {v['no_entregados_detectados']}")
+        print(f"En camino detectados: {v['en_camino_detectados']}")
+
+        if v["planes_sin_despachar"]:
+            print(f"\nPlanes creados pero NO despachados:")
+            for p in v["planes_sin_despachar"]:
+                print(f"  - {p['plan']} (status: {p['status']})")
+
+        if v["detalle"]:
+            print(f"\nCambios detectados:")
+            for d in v["detalle"]:
+                print(f"  #{d['numero']} {d['direccion']}: {d['estado_anterior']} -> {d['estado_nuevo']}")
+
+            aplicar = input("\nAplicar cambios? (s/n): ").strip().lower()
+            if aplicar == "s":
+                result = operations.verify_orders_drivin(fecha=fecha, auto_update=True)
+                print(f"\n{result['actualizados']} pedidos actualizados!")
+        elif v["total_verificados"] > 0:
+            print("\nNo se detectaron cambios. Todo al dia.")
+
+        if v["estancados"]:
+            print(f"\nPedidos estancados (PENDIENTE por mas de 2 dias):")
+            for e in v["estancados"]:
+                print(f"  #{e['numero']} {e['direccion']} - {e['dias']} dias - "
+                      f"Codigo: {e['codigo'] or 'sin codigo'} - Plan: {e['plan'] or 'sin plan'}")
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+# === OPCION 0: Actualizar cache ===
 
 def actualizar_cache():
     print("\n--- Actualizar cache de direcciones ---\n")
@@ -428,36 +551,56 @@ def main():
         clear_screen()
         print_header()
 
-        print("  1. Consultar pedidos web (Bsale)")
-        print("  2. Crear plan del dia (driv.in)")
-        print("  3. Subir pedidos a un plan")
-        print("  4. Asignar conductor a ruta")
-        print("  5. Ver estado de rutas")
-        print("  6. Actualizar cache de direcciones")
-        print("  0. Salir")
+        print("  1. Ver pedidos de hoy")
+        print("  2. Consultar pedidos web (Bsale)")
+        print("  3. Crear plan del dia (driv.in)")
+        print("  4. Subir pedidos a un plan")
+        print("  5. Asignar conductor a ruta")
+        print("  6. Ver estado de rutas")
+        print("  7. Importar planilla reparto")
+        print("  8. Ejecutar rutina diaria")
+        print("  9. Resumen del dia")
+        print("  V. Verificar pedidos contra driv.in")
+        print("  0. Actualizar cache de direcciones")
+        print("  Q. Salir")
         print()
 
-        opcion = input("  Opcion: ").strip()
+        opcion = input("  Opcion: ").strip().upper()
 
         if opcion == "1":
-            consultar_pedidos()
+            ver_pedidos_hoy()
             pause()
         elif opcion == "2":
-            crear_plan()
+            consultar_pedidos()
             pause()
         elif opcion == "3":
-            subir_pedidos()
+            crear_plan()
             pause()
         elif opcion == "4":
-            asignar_conductor()
+            subir_pedidos()
             pause()
         elif opcion == "5":
-            ver_estado()
+            asignar_conductor()
             pause()
         elif opcion == "6":
-            actualizar_cache()
+            ver_estado()
+            pause()
+        elif opcion == "7":
+            importar_planilla()
+            pause()
+        elif opcion == "8":
+            ejecutar_rutina()
+            pause()
+        elif opcion == "9":
+            resumen()
+            pause()
+        elif opcion == "V":
+            verificar_drivin()
             pause()
         elif opcion == "0":
+            actualizar_cache()
+            pause()
+        elif opcion == "Q":
             print("\nHasta luego!")
             sys.exit(0)
         else:
