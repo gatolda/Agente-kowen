@@ -7,6 +7,7 @@ import os
 import requests
 
 BASE_URL = "https://external.driv.in/api/external/v2"
+TIMEOUT = 30  # segundos
 
 
 def _get_headers():
@@ -24,7 +25,8 @@ def _request(method, endpoint, params=None, json_body=None):
     """Ejecuta un request a la API de driv.in."""
     url = f"{BASE_URL}/{endpoint}"
     response = requests.request(
-        method, url, headers=_get_headers(), params=params, json=json_body
+        method, url, headers=_get_headers(), params=params, json=json_body,
+        timeout=TIMEOUT,
     )
     response.raise_for_status()
     return response.json()

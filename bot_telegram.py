@@ -48,6 +48,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Resumen del dia", callback_data="resumen")],
         [InlineKeyboardButton("Ejecutar rutina", callback_data="rutina")],
         [InlineKeyboardButton("Verificar driv.in", callback_data="verificar")],
+        [InlineKeyboardButton("Procesar correos / pagos", callback_data="correos")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -337,6 +338,60 @@ async def verificar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"Error: {e}")
 
 
+async def correos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Procesa emails no leidos y concilia pagos."""
+    import payments
+    msg = await update.message.reply_text("Leyendo correos no leidos...")
+
+    try:
+        r = payments.procesar_emails_no_leidos(max_emails=30, marcar_leidos=False)
+
+        if r["total"] == 0:
+            await msg.edit_text("No hay correos no leidos.")
+            return
+
+        cats = r.get("por_categoria", {})
+        conciliados = r.get("pagos_conciliados", [])
+        sugeridos = r.get("pagos_sugeridos", [])
+        sin_match = r.get("pagos_sin_match", [])
+        alertas = r.get("alertas", [])
+
+        text = f"*Correos procesados: {r['total']}*\n"
+        if cats:
+            text += "\n" + ", ".join(f"{k}:{v}" for k, v in cats.items()) + "\n"
+
+        if conciliados:
+            text += f"\n*Pagos conciliados auto ({len(conciliados)}):*\n"
+            for p in conciliados[:8]:
+                text += (f"  #{p['pedido']} {p['cliente'][:20]} "
+                         f"${p['monto']} (score {p['score']})\n")
+
+        if sugeridos:
+            text += f"\n*Pagos para revisar ({len(sugeridos)}):*\n"
+            for p in sugeridos[:5]:
+                pago = p["pago"]
+                text += (f"  {pago.get('remitente_nombre', '')[:20]} "
+                         f"${pago.get('monto', '')} -> "
+                         f"{len(p['candidatos'])} candidatos\n")
+
+        if sin_match:
+            text += f"\n*Pagos sin match ({len(sin_match)}):*\n"
+            for p in sin_match[:5]:
+                pago = p["pago"]
+                text += (f"  {pago.get('remitente_nombre', '')[:20]} "
+                         f"${pago.get('monto', '')}\n")
+
+        if alertas:
+            text += f"\n*Alertas ({len(alertas)}):*\n"
+            for a in alertas[:5]:
+                text += f"  [{a['categoria']}] {a['subject'][:35]}\n"
+
+        await msg.edit_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        await msg.edit_text(f"Error: {e}")
+
+
 async def planes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Muestra planes del dia."""
     date = datetime.now().strftime("%Y-%m-%d")
@@ -498,6 +553,38 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await msg.edit_text(f"Error: {e}")
 
+    elif query.data == "correos":
+        import payments
+        msg = await query.edit_message_text("Leyendo correos no leidos...")
+        try:
+            r = payments.procesar_emails_no_leidos(max_emails=30, marcar_leidos=False)
+            if r["total"] == 0:
+                await msg.edit_text("No hay correos no leidos.")
+                return
+            cats = r.get("por_categoria", {})
+            conciliados = r.get("pagos_conciliados", [])
+            sugeridos = r.get("pagos_sugeridos", [])
+            sin_match = r.get("pagos_sin_match", [])
+            alertas = r.get("alertas", [])
+            text = f"*Correos: {r['total']}*\n"
+            if cats:
+                text += ", ".join(f"{k}:{v}" for k, v in cats.items()) + "\n"
+            if conciliados:
+                text += f"\nConciliados auto: {len(conciliados)}\n"
+                for p in conciliados[:5]:
+                    text += f"  #{p['pedido']} {p['cliente'][:20]} ${p['monto']}\n"
+            if sugeridos:
+                text += f"\nPara revisar: {len(sugeridos)}\n"
+            if sin_match:
+                text += f"\nSin match: {len(sin_match)}\n"
+            if alertas:
+                text += f"\nAlertas: {len(alertas)}\n"
+                for a in alertas[:3]:
+                    text += f"  [{a['categoria']}] {a['subject'][:30]}\n"
+            await msg.edit_text(text, parse_mode="Markdown")
+        except Exception as e:
+            await msg.edit_text(f"Error: {e}")
+
     elif query.data == "verificar":
         msg = await query.edit_message_text("Verificando contra driv.in...")
         try:
@@ -541,12 +628,13 @@ def main():
     app.add_handler(CommandHandler("rutina", rutina_cmd))
     app.add_handler(CommandHandler("planes", planes_cmd))
     app.add_handler(CommandHandler("verificar", verificar_cmd))
+    app.add_handler(CommandHandler("correos", correos_cmd))
 
     # Botones
     app.add_handler(CallbackQueryHandler(button_callback))
 
     print("Bot de Telegram iniciado. Ctrl+C para detener.")
-    print("Comandos: /start /hoy /pedidos /importar /rutas /resumen /rutina /planes")
+    print("Comandos: /start /hoy /pedidos /importar /rutas /resumen /rutina /planes /verificar /correos")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

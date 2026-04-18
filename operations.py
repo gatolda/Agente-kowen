@@ -3,6 +3,7 @@ Operaciones de negocio del Agente Kowen.
 Sincronizacion, importacion, rutina diaria y resumen.
 """
 
+import os
 from datetime import datetime, timedelta
 from unidecode import unidecode
 
@@ -13,7 +14,22 @@ from sheets_client import (
     OP_COLS, TAB_OPERACION, SPREADSHEET_ID,
 )
 
-PLANILLA_REPARTO_ID = "1jNTWO2hkkRBlEamXrQ6BGy28tlAj7ei1Qyyt559mvds"
+PLANILLA_REPARTO_ID = os.getenv(
+    "PLANILLA_REPARTO_ID", "1jNTWO2hkkRBlEamXrQ6BGy28tlAj7ei1Qyyt559mvds",
+)
+PLANILLA_CACTUS_ID = os.getenv(
+    "PLANILLA_CACTUS_ID", "1w5Klrcbq7-B6HUBCADeIkmv5_r4vhGnsYv7EuJQqxgU",
+)
+
+# Mapeo de status de driv.in (PODs / orders) a estados del sistema.
+DRIVIN_STATUS_MAP = {
+    "approved": "ENTREGADO",
+    "delivered": "ENTREGADO",
+    "rejected": "NO ENTREGADO",
+    "not_delivered": "NO ENTREGADO",
+    "pending": "EN CAMINO",
+    "in-transit": "EN CAMINO",
+}
 
 
 # ===== SINCRONIZACION =====
@@ -718,9 +734,6 @@ def sync_from_planilla_reparto(fecha=None):
     return len(nuevos)
 
 
-PLANILLA_CACTUS_ID = "1w5Klrcbq7-B6HUBCADeIkmv5_r4vhGnsYv7EuJQqxgU"
-
-
 def sync_from_planilla_cactus(fecha=None):
     """
     Importa pedidos desde la planilla Cactus (Enero 2023) a OPERACION DIARIA.
@@ -943,14 +956,7 @@ def sync_from_drivin(fecha=None, plan_name=""):
         if code:
             code_to_pedido[code] = p
 
-    estado_map = {
-        "approved": "ENTREGADO",
-        "delivered": "ENTREGADO",
-        "rejected": "NO ENTREGADO",
-        "not_delivered": "NO ENTREGADO",
-        "pending": "EN CAMINO",
-        "in-transit": "EN CAMINO",
-    }
+    estado_map = DRIVIN_STATUS_MAP
 
     updates = []
     seen = set()
@@ -1309,14 +1315,7 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
         if addr_norm:
             pods_by_addr[addr_norm] = pod
 
-    estado_map = {
-        "approved": "ENTREGADO",
-        "delivered": "ENTREGADO",
-        "rejected": "NO ENTREGADO",
-        "not_delivered": "NO ENTREGADO",
-        "pending": "EN CAMINO",
-        "in-transit": "EN CAMINO",
-    }
+    estado_map = DRIVIN_STATUS_MAP
 
     updates = []
 

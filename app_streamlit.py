@@ -1452,7 +1452,7 @@ with chat_col:
 
 st.markdown("---")
 
-tab_cl, tab_pg, tab_sync = st.tabs(["👥 Clientes", "💰 Pagos", "🔄 Sync driv.in"])
+tab_cl, tab_pg, tab_cr, tab_sync = st.tabs(["👥 Clientes", "💰 Pagos", "📧 Correos", "🔄 Sync driv.in"])
 
 with tab_cl:
     clientes = sheets_client.get_clientes()
@@ -1522,6 +1522,92 @@ with tab_pg:
                     })
                     st.success("Pago registrado!")
                     st.rerun()
+
+with tab_cr:
+    st.markdown("##### Procesar correos y conciliar pagos")
+    st.caption("Lee emails no leidos de copiacorreoskowen@gmail.com, clasifica y concilia pagos automaticamente.")
+
+    cr_max = st.number_input("Max emails a procesar", min_value=1, max_value=100, value=30, key="cr_max")
+    cr_mark = st.checkbox("Marcar como leidos despues de procesar", value=False, key="cr_mark")
+
+    if st.button("Procesar correos ahora", type="primary", use_container_width=True, key="btn_correos"):
+        with st.spinner("Leyendo Gmail, clasificando y conciliando pagos..."):
+            try:
+                import payments
+                r = payments.procesar_emails_no_leidos(max_emails=cr_max, marcar_leidos=cr_mark)
+                st.session_state["_correos_result"] = r
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    res = st.session_state.get("_correos_result")
+    if res:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total", res.get("total", 0))
+        c2.metric("Conciliados", len(res.get("pagos_conciliados", [])))
+        c3.metric("Sugeridos", len(res.get("pagos_sugeridos", [])))
+        c4.metric("Sin match", len(res.get("pagos_sin_match", [])))
+
+        cats = res.get("por_categoria", {})
+        if cats:
+            st.caption("Por categoria: " + ", ".join(f"{k}={v}" for k, v in cats.items()))
+
+        conciliados = res.get("pagos_conciliados", [])
+        if conciliados:
+            st.success(f"{len(conciliados)} pagos conciliados automaticamente:")
+            st.dataframe(conciliados, use_container_width=True, hide_index=True)
+
+        sugeridos = res.get("pagos_sugeridos", [])
+        if sugeridos:
+            st.warning(f"{len(sugeridos)} pagos con candidatos para revisar:")
+            for i, p in enumerate(sugeridos):
+                pago = p["pago"]
+                with st.expander(
+                    f"{pago.get('remitente_nombre', '')} - ${pago.get('monto', '')} "
+                    f"({pago.get('fecha', '')})"
+                ):
+                    st.json(pago)
+                    st.markdown("**Candidatos:**")
+                    st.dataframe(p["candidatos"], use_container_width=True, hide_index=True)
+                    cand_labels = [
+                        f"#{c['numero']} {c['cliente']} {c['fecha']} ${c['monto']} (score {c['score']})"
+                        for c in p["candidatos"]
+                    ]
+                    sel = st.selectbox("Vincular a pedido", ["(ninguno)"] + cand_labels, key=f"sug_sel_{i}")
+                    if sel != "(ninguno)" and st.button("Aplicar match manual", key=f"sug_btn_{i}"):
+                        idx = cand_labels.index(sel)
+                        pedido_sel = p["candidatos"][idx]
+                        # Buscar pedido completo por numero
+                        pedidos = sheets_client.get_pedidos()
+                        pedido_full = next(
+                            (pp for pp in pedidos if pp.get("#") == pedido_sel["numero"]), None
+                        )
+                        if pedido_full:
+                            try:
+                                import payments
+                                payments.aplicar_pago(pago, pedido_full, matched_auto=False)
+                                st.success(f"Pago vinculado a pedido #{pedido_sel['numero']}")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+
+        sin_match = res.get("pagos_sin_match", [])
+        if sin_match:
+            st.error(f"{len(sin_match)} pagos sin match (revisar manualmente):")
+            for p in sin_match:
+                st.write(f"- {p['email_subject']} → ${p['pago'].get('monto', '')} "
+                         f"de {p['pago'].get('remitente_nombre', '')}")
+
+        alertas = res.get("alertas", [])
+        if alertas:
+            st.info(f"{len(alertas)} alertas (pedidos/cotizaciones nuevos):")
+            for a in alertas:
+                st.write(f"- [{a['categoria']}] {a['subject']} — {a['from']}")
+
+        if res.get("errores"):
+            st.error("Errores:")
+            for e in res["errores"]:
+                st.write(f"- {e}")
+
 
 with tab_sync:
     sync_t1, sync_t2, sync_t3 = st.tabs(["📡 Desde driv.in", "📊 Hacia Planilla Reparto", "🚗 Asignar conductor"])

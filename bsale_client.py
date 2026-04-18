@@ -8,7 +8,8 @@ import requests
 from datetime import datetime, timezone
 
 BASE_URL = "https://api.bsale.cl/v1"
-PEDIDO_WEB_TYPE_ID = 32
+PEDIDO_WEB_TYPE_ID = int(os.getenv("BSALE_PEDIDO_WEB_TYPE_ID", "32"))
+TIMEOUT = 30  # segundos
 
 
 def _get_headers():
@@ -22,7 +23,7 @@ def _get_headers():
 def _request(endpoint, params=None):
     """Ejecuta un GET a la API de Bsale."""
     url = f"{BASE_URL}/{endpoint}"
-    response = requests.get(url, headers=_get_headers(), params=params)
+    response = requests.get(url, headers=_get_headers(), params=params, timeout=TIMEOUT)
     response.raise_for_status()
     return response.json()
 
@@ -171,7 +172,7 @@ def _get_order_detail(doc_id):
             descripcion = ""
             if variant_href:
                 try:
-                    resp = requests.get(variant_href, headers=_get_headers())
+                    resp = requests.get(variant_href, headers=_get_headers(), timeout=TIMEOUT)
                     if resp.ok:
                         descripcion = resp.json().get("description", "")
                 except Exception:

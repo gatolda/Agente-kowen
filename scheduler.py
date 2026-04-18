@@ -46,6 +46,7 @@ HORA_FIN = 19      # Fin jornada laboral
 HORA_CIERRE = 18   # Hora del resumen de cierre (18:30)
 INTERVALO_IMPORTAR = 15   # Minutos entre importaciones
 INTERVALO_VERIFICAR = 30  # Minutos entre verificaciones driv.in
+INTERVALO_EMAILS = 30     # Minutos entre lecturas de Gmail
 DIAS_LABORALES = {0, 1, 2, 3, 4}  # Lunes=0 a Viernes=4
 
 
@@ -257,6 +258,70 @@ def verificar_estados():
     return v
 
 
+# --- Tarea 3.5: Procesar emails (cada 30 min) ---
+
+def procesar_emails():
+    """Lee emails no leidos, clasifica y concilia pagos."""
+    import payments
+
+    try:
+        r = payments.procesar_emails_no_leidos(max_emails=30, marcar_leidos=False)
+    except Exception as e:
+        log.warning(f"Error procesando emails: {e}")
+        return None
+
+    if r["total"] == 0:
+        return r
+
+    cats = r.get("por_categoria", {})
+    conciliados = r.get("pagos_conciliados", [])
+    sugeridos = r.get("pagos_sugeridos", [])
+    sin_match = r.get("pagos_sin_match", [])
+    alertas = r.get("alertas", [])
+
+    log.info(f"Emails: {r['total']} leidos | "
+             f"pagos auto: {len(conciliados)}, "
+             f"sugeridos: {len(sugeridos)}, "
+             f"sin match: {len(sin_match)}, "
+             f"alertas: {len(alertas)}")
+
+    # Notificar solo si hay pagos conciliados o cosas para revisar
+    if conciliados or sugeridos or sin_match or alertas:
+        msg = "*Emails procesados*\n"
+        resumen_cats = ", ".join(f"{k}:{v}" for k, v in cats.items())
+        if resumen_cats:
+            msg += f"\n{resumen_cats}\n"
+
+        if conciliados:
+            msg += f"\n*Pagos conciliados auto ({len(conciliados)}):*"
+            for p in conciliados[:5]:
+                msg += f"\n- #{p['pedido']} {p['cliente'][:25]} ${p['monto']}"
+
+        if sugeridos:
+            msg += f"\n\n*Pagos para revisar ({len(sugeridos)}):*"
+            for p in sugeridos[:5]:
+                pago = p["pago"]
+                msg += (f"\n- {pago.get('remitente_nombre', '')[:25]} "
+                        f"${pago.get('monto', '')} -> "
+                        f"{len(p['candidatos'])} candidatos")
+
+        if sin_match:
+            msg += f"\n\n*Pagos sin match ({len(sin_match)}):*"
+            for p in sin_match[:5]:
+                pago = p["pago"]
+                msg += (f"\n- {pago.get('remitente_nombre', '')[:25]} "
+                        f"${pago.get('monto', '')}")
+
+        if alertas:
+            msg += f"\n\n*Alertas ({len(alertas)}):*"
+            for a in alertas[:5]:
+                msg += f"\n- [{a['categoria']}] {a['subject'][:40]}"
+
+        notificar(msg)
+
+    return r
+
+
 # --- Tarea 4: Resumen de cierre (18:30) ---
 
 def resumen_cierre():
@@ -309,6 +374,7 @@ def daemon():
     cierre_hecho_hoy = None
     ultima_importacion = None
     ultima_verificacion = None
+    ultima_emails = None
 
     while True:
         ahora = datetime.now()
@@ -339,6 +405,14 @@ def daemon():
                      or (ahora - ultima_verificacion).seconds >= INTERVALO_VERIFICAR * 60)):
             verificar_estados()
             ultima_verificacion = ahora
+
+        # --- Procesar emails / pagos (cada 30 min) ---
+        if (es_horario_laboral()
+                and rutina_hecha_hoy == hoy
+                and (ultima_emails is None
+                     or (ahora - ultima_emails).seconds >= INTERVALO_EMAILS * 60)):
+            procesar_emails()
+            ultima_emails = ahora
 
         # --- Resumen de cierre (18:30, una vez al dia) ---
         if (ahora.weekday() in DIAS_LABORALES

@@ -541,6 +541,66 @@ def verificar_drivin():
 
 # === OPCION 0: Actualizar cache ===
 
+def procesar_correos():
+    """Lee emails no leidos, clasifica y concilia pagos."""
+    import payments
+
+    print("\n--- Procesar correos / pagos ---\n")
+    print("Leyendo correos no leidos de Gmail...")
+    print("(La primera vez abre el navegador para login con copiacorreoskowen@gmail.com)\n")
+
+    try:
+        r = payments.procesar_emails_no_leidos(max_emails=30, marcar_leidos=False)
+    except Exception as e:
+        print(f"Error: {e}")
+        return
+
+    print(f"Total emails procesados: {r['total']}\n")
+
+    cats = r.get("por_categoria", {})
+    if cats:
+        print("Por categoria:")
+        for k, v in cats.items():
+            print(f"  {k}: {v}")
+
+    conciliados = r.get("pagos_conciliados", [])
+    if conciliados:
+        print(f"\nPagos conciliados automaticamente ({len(conciliados)}):")
+        for p in conciliados:
+            print(f"  - Pedido #{p['pedido']} {p['cliente']} | ${p['monto']} "
+                  f"(score: {p['score']})")
+
+    sugeridos = r.get("pagos_sugeridos", [])
+    if sugeridos:
+        print(f"\nPagos con candidatos para revisar ({len(sugeridos)}):")
+        for p in sugeridos:
+            pago = p["pago"]
+            print(f"  - {pago.get('remitente_nombre', '')} ${pago.get('monto', '')} "
+                  f"({pago.get('fecha', '')})")
+            for c in p["candidatos"][:3]:
+                print(f"      #{c['numero']} {c['cliente'][:25]} "
+                      f"{c['fecha']} ${c['monto']} (score: {c['score']})")
+
+    sin_match = r.get("pagos_sin_match", [])
+    if sin_match:
+        print(f"\nPagos sin match ({len(sin_match)}):")
+        for p in sin_match:
+            pago = p["pago"]
+            print(f"  - {pago.get('remitente_nombre', '')} ${pago.get('monto', '')} "
+                  f"- {p['email_subject'][:40]}")
+
+    alertas = r.get("alertas", [])
+    if alertas:
+        print(f"\nAlertas (pedidos/cotizaciones) ({len(alertas)}):")
+        for a in alertas:
+            print(f"  - [{a['categoria']}] {a['from'][:30]} | {a['subject'][:50]}")
+
+    if r.get("errores"):
+        print("\nErrores:")
+        for e in r["errores"]:
+            print(f"  - {e}")
+
+
 def actualizar_cache():
     print("\n--- Actualizar cache de direcciones ---\n")
     print("Descargando todas las direcciones de driv.in...")
@@ -570,6 +630,7 @@ def main():
         print("  8. Ejecutar rutina diaria")
         print("  9. Resumen del dia")
         print("  V. Verificar pedidos contra driv.in")
+        print("  C. Procesar correos / pagos")
         print("  0. Actualizar cache de direcciones")
         print("  Q. Salir")
         print()
@@ -605,6 +666,9 @@ def main():
             pause()
         elif opcion == "V":
             verificar_drivin()
+            pause()
+        elif opcion == "C":
+            procesar_correos()
             pause()
         elif opcion == "0":
             actualizar_cache()
