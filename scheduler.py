@@ -18,7 +18,7 @@ import os
 import sys
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -95,15 +95,16 @@ def ejecutar_rutina():
         return None
 
     # Log del resultado
+    bsale_pend = resultado.get("bsale_pendientes", [])
     log.info(f"Ayer ({resultado['fecha_ayer']}): "
              f"{resultado['entregados_ayer']} entregados, "
              f"{resultado['movidos_a_hoy']} movidos")
     log.info(f"Hoy ({resultado['fecha_hoy']}): "
-             f"Bsale +{resultado['bsale_importados']}, "
              f"Planilla +{resultado['planilla_importados']}, "
              f"Cactus +{resultado.get('cactus_importados', 0)}, "
              f"Codigos {resultado['codigos_asignados']}, "
-             f"driv.in {resultado.get('drivin_subidos', 0)}")
+             f"driv.in {resultado.get('drivin_subidos', 0)}, "
+             f"Bsale sin planilla: {len(bsale_pend)}")
 
     if resultado["errores"]:
         for err in resultado["errores"]:
@@ -118,12 +119,22 @@ def ejecutar_rutina():
     msg = (
         f"*Rutina diaria completada*\n\n"
         f"*{hoy}*: {total} pedidos, {total_bot} botellones\n"
-        f"Bsale: +{resultado['bsale_importados']}\n"
         f"Planilla: +{resultado['planilla_importados']}\n"
         f"Cactus: +{resultado.get('cactus_importados', 0)}\n"
         f"Codigos: {resultado['codigos_asignados']}\n"
         f"driv.in: {resultado.get('drivin_subidos', 0)} subidos"
     )
+
+    # Alertar de pedidos Bsale que no estan en la planilla
+    if bsale_pend:
+        msg += f"\n\n*{len(bsale_pend)} pedidos Bsale sin planilla:*"
+        for p in bsale_pend[:8]:
+            dir_str = p.get("direccion", "")[:30]
+            msg += f"\n- #{p.get('pedido_nro', '')} {dir_str} ({p.get('cantidad', 0)})"
+        if len(bsale_pend) > 8:
+            msg += f"\n...y {len(bsale_pend) - 8} mas"
+        msg += "\n_Pasar a la planilla para operar._"
+
     if resultado["errores"]:
         msg += "\n\n*Advertencias:*\n" + "\n".join(f"- {e}" for e in resultado["errores"])
 
@@ -136,35 +147,19 @@ def ejecutar_rutina():
 # --- Tarea 2: Importar pedidos nuevos (cada 15 min) ---
 
 def importar_nuevos():
-    """Importa pedidos nuevos de Bsale y planillas."""
+    """
+    Importa pedidos nuevos desde las planillas (fuentes de verdad operativas).
+
+    Nota: NO se importa Bsale automaticamente. La regla del negocio es que
+    la planilla Kowen (PRIMER TURNO) manda — los pedidos web se pasan
+    manualmente a la planilla antes de ser operativos. Para alertar de
+    pedidos Bsale pendientes de validacion, ver check_bsale_pendientes()
+    y el paso 4 de la rutina diaria.
+    """
     import operations
-    import sheets_client
 
     hoy = datetime.now().strftime("%d/%m/%Y")
     total_importados = 0
-
-    # Bsale
-    try:
-        import bsale_client
-        all_pedidos = sheets_client.get_pedidos()
-        bsale_nums = [int(p.get("Pedido Bsale", "0") or "0") for p in all_pedidos]
-        since = max(bsale_nums) if bsale_nums else 0
-
-        orders = bsale_client.get_web_orders(since_number=since)
-        if orders:
-            # Filtrar solo pedidos de hoy o ayer
-            hoy_dt = datetime.now()
-            hoy_iso = hoy_dt.strftime("%Y-%m-%d")
-            ayer_iso = (hoy_dt - timedelta(days=1)).strftime("%Y-%m-%d")
-            orders = [o for o in orders if o.get("fecha", "") in (hoy_iso, ayer_iso)]
-
-            if orders:
-                count = operations.sync_from_bsale(orders)
-                if count > 0:
-                    log.info(f"Bsale: +{count} pedidos nuevos")
-                    total_importados += count
-    except Exception as e:
-        log.warning(f"Error importando Bsale: {e}")
 
     # Planilla Kowen
     try:

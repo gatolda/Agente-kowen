@@ -446,12 +446,21 @@ def ejecutar_rutina():
         print(f"  Movidos a hoy: {resultado['movidos_a_hoy']}")
         print(f"  Duplicados eliminados: {resultado['duplicados_eliminados']}")
         print(f"\nImportaciones de hoy:")
-        print(f"  Desde Bsale: {resultado['bsale_importados']}")
-        print(f"  Desde planilla: {resultado['planilla_importados']}")
+        print(f"  Planilla Kowen: {resultado['planilla_importados']}")
+        print(f"  Planilla Cactus: {resultado.get('cactus_importados', 0)}")
         print(f"  Codigos asignados: {resultado['codigos_asignados']}")
         print(f"\nPlan driv.in:")
         print(f"  Plan: {resultado.get('drivin_plan', 'N/A')}")
         print(f"  Subidos: {resultado.get('drivin_subidos', 0)}")
+
+        bsale_pend = resultado.get("bsale_pendientes", [])
+        if bsale_pend:
+            print(f"\n{len(bsale_pend)} pedidos Bsale sin planilla (pasar a planilla manualmente):")
+            for p in bsale_pend[:10]:
+                print(f"  #{p.get('pedido_nro', '')} {p.get('direccion', '')[:35]} "
+                      f"({p.get('cantidad', 0)}x) - {p.get('cliente', '')[:25]}")
+            if len(bsale_pend) > 10:
+                print(f"  ...y {len(bsale_pend) - 10} mas")
 
         if resultado["errores"]:
             print(f"\nAdvertencias:")

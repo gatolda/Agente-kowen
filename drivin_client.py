@@ -77,6 +77,49 @@ def get_all_addresses():
     return all_addresses
 
 
+def create_address(code, address1, city, address2="", name="", contact_name="",
+                   phone="", email="", lat=None, lng=None, country="Chile",
+                   state="Region Metropolitana", address_type="Casa"):
+    """
+    Crea una direccion de cliente en driv.in.
+
+    Si no se pasan lat/lng, driv.in intenta geocodificar la direccion.
+
+    Args:
+        code: Codigo unico de la direccion (ej: "SI 538").
+        address1: Calle y numero (ej: "San Isidro 538").
+        city: Comuna (ej: "Santiago").
+        address2: Depto/oficina opcional.
+        name: Nombre de la direccion/cliente.
+        contact_name: Nombre del contacto.
+        phone, email: Contacto.
+        lat, lng: Coordenadas (opcional — si se pasan saltan el geocoding).
+
+    Returns:
+        Dict con la respuesta de la API.
+    """
+    addr = {
+        "code": code,
+        "address1": address1,
+        "address2": address2 or "",
+        "city": city,
+        "state": state,
+        "country": country,
+        "name": name or address1,
+        "address_type": address_type,
+        "contact_name": contact_name,
+        "phone": phone,
+        "email": email,
+        "update_all": True,
+    }
+    if lat is not None:
+        addr["lat"] = lat
+    if lng is not None:
+        addr["lng"] = lng
+
+    return _request("POST", "addresses", json_body={"addresses": [addr]})
+
+
 # --- Pedidos ---
 
 def create_orders(clients, schema_code=None, scenario_token=None):

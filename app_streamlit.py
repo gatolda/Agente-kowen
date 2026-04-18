@@ -202,10 +202,13 @@ with st.sidebar:
                     lines.append(f"**Ayer ({resultado['fecha_ayer']}):**")
                     lines.append(f"  Entregados: {resultado['entregados_ayer']}")
                     lines.append(f"  Movidos a hoy: {resultado['movidos_a_hoy']}")
-                if resultado["bsale_importados"]:
-                    lines.append(f"Bsale: +{resultado['bsale_importados']} pedidos")
                 if resultado["planilla_importados"]:
                     lines.append(f"Planilla: +{resultado['planilla_importados']} pedidos")
+                if resultado.get("cactus_importados"):
+                    lines.append(f"Cactus: +{resultado['cactus_importados']} pedidos")
+                bsale_pend = resultado.get("bsale_pendientes", [])
+                if bsale_pend:
+                    lines.append(f"⚠️ {len(bsale_pend)} pedidos Bsale sin planilla (pasar manualmente)")
                 if resultado["codigos_asignados"]:
                     lines.append(f"Códigos asignados: {resultado['codigos_asignados']}")
                 if resultado.get("drivin_subidos"):

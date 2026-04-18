@@ -30,13 +30,15 @@ def log_event(tipo, accion, detalle="", resultado="", origen="sistema"):
 
 def log_rutina(resultado):
     """Registra el resultado completo de una rutina diaria."""
+    bsale_pend = len(resultado.get("bsale_pendientes", []))
     resumen = (
         f"Ayer: {resultado['entregados_ayer']} entregados, "
         f"{resultado['movidos_a_hoy']} movidos. "
-        f"Hoy: +{resultado['bsale_importados']} Bsale, "
-        f"+{resultado['planilla_importados']} planilla, "
+        f"Hoy: +{resultado['planilla_importados']} planilla, "
+        f"+{resultado.get('cactus_importados', 0)} Cactus, "
         f"{resultado['codigos_asignados']} codigos, "
-        f"{resultado.get('drivin_subidos', 0)} a drivin."
+        f"{resultado.get('drivin_subidos', 0)} a drivin, "
+        f"{bsale_pend} Bsale sin planilla."
     )
     errores = "; ".join(resultado.get("errores", []))
     log_event(

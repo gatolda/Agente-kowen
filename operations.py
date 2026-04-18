@@ -137,6 +137,227 @@ def check_bsale_orders(orders):
     return result
 
 
+def crear_direccion_drivin(pedido_num, codigo_sugerido=None):
+    """
+    Crea una nueva direccion en driv.in para un pedido de OPERACION DIARIA
+    que no tiene codigo driv.in asignado, la agrega al cache local y asigna
+    el codigo al pedido.
+
+    Regla del negocio: el codigo usa la numeracion de la direccion
+    (ej: San Isidro 538 -> "SI 538" usando iniciales + numero).
+
+    Args:
+        pedido_num: Numero de fila (#) del pedido en OPERACION DIARIA.
+        codigo_sugerido: Codigo drivin. Si None, se genera a partir
+                         de las iniciales + numero de calle.
+
+    Returns:
+        Dict con {"code", "status", "pedido_num"} o error.
+    """
+    import address_matcher
+    import drivin_client
+    import csv
+
+    all_p = get_pedidos()
+    pedido = next((p for p in all_p if p.get("#") == str(pedido_num)), None)
+    if not pedido:
+        return {"status": "error", "message": f"Pedido #{pedido_num} no existe"}
+
+    direccion = pedido.get("Direccion", "").strip()
+    depto = pedido.get("Depto", "").strip()
+    comuna = pedido.get("Comuna", "").strip() or "Santiago"
+    cliente = pedido.get("Cliente", "").strip()
+    telefono = pedido.get("Telefono", "").strip()
+    email = pedido.get("Email", "").strip()
+
+    if not direccion:
+        return {"status": "error", "message": f"Pedido #{pedido_num} sin direccion"}
+
+    # Generar codigo sugerido: iniciales + numero
+    if not codigo_sugerido:
+        numero = address_matcher.extract_street_number(direccion)
+        if not numero:
+            return {"status": "error",
+                    "message": f"No se pudo extraer numero de: {direccion}"}
+        nombre_calle = direccion.replace(numero, "").strip()
+        tokens = [t for t in nombre_calle.split()
+                  if t.lower() not in ("avenida", "av", "av.", "calle", "pasaje")]
+        iniciales = "".join(t[0].upper() for t in tokens if t)[:3] or "X"
+        codigo_sugerido = f"{iniciales} {numero}"
+
+    # Crear en driv.in (deja que drivin geocodifique)
+    try:
+        resp = drivin_client.create_address(
+            code=codigo_sugerido,
+            address1=direccion,
+            address2=depto,
+            city=comuna,
+            name=cliente or direccion,
+            contact_name=cliente,
+            phone=telefono,
+            email=email,
+        )
+    except Exception as e:
+        return {"status": "error", "message": f"Error driv.in: {e}",
+                "code": codigo_sugerido}
+
+    # Apendear al cache CSV
+    try:
+        with open(address_matcher.CACHE_FILE, "a", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                codigo_sugerido,
+                cliente or direccion,
+                direccion,
+                depto,
+                comuna,
+                "", "",  # lat, lng (se llenaran en proximo refresh)
+            ])
+    except Exception:
+        pass
+
+    # Asignar codigo al pedido
+    update_pedido(int(pedido_num), {"codigo_drivin": codigo_sugerido})
+
+    return {
+        "status": "ok",
+        "code": codigo_sugerido,
+        "pedido_num": pedido_num,
+        "direccion": direccion,
+        "drivin_response": resp,
+    }
+
+
+def check_bsale_pendientes(fecha=None):
+    """
+    Revisa pedidos Bsale recientes que aun NO estan reflejados en la planilla
+    Kowen (PRIMER TURNO) ni en OPERACION DIARIA.
+
+    La regla del negocio (feedback_planilla_manda): la planilla Kowen manda.
+    Los pedidos web de Bsale deben pasarse manualmente a la planilla antes
+    de ser operativos. Esta funcion NO importa — solo alerta al equipo de
+    los pedidos Bsale de hoy/ayer que siguen pendientes de validacion manual.
+
+    Args:
+        fecha: Fecha base (DD/MM/YYYY). None = hoy.
+
+    Returns:
+        Dict con:
+          - pendientes: [{"pedido_nro", "fecha", "cliente", "direccion", "depto",
+                          "comuna", "cantidad", "marca"}]
+          - total_revisados: int
+          - ya_en_sistema: int  (ya sea en planilla o en OPERACION DIARIA)
+    """
+    import bsale_client
+
+    if not fecha:
+        fecha = datetime.now().strftime("%d/%m/%Y")
+
+    parts = fecha.split("/")
+    hoy_dt = datetime(int(parts[2]), int(parts[1]), int(parts[0]))
+    ayer_dt = hoy_dt - timedelta(days=1)
+    hoy_iso = hoy_dt.strftime("%Y-%m-%d")
+    ayer_iso = ayer_dt.strftime("%Y-%m-%d")
+    fecha_ayer = ayer_dt.strftime("%d/%m/%Y")
+
+    # Ultimo numero Bsale ya registrado
+    all_pedidos = get_pedidos()
+    bsale_nums = [int(p.get("Pedido Bsale", "0") or "0") for p in all_pedidos]
+    since = max(bsale_nums) if bsale_nums else 0
+
+    try:
+        orders = bsale_client.get_web_orders(since_number=since)
+    except Exception:
+        orders = []
+
+    # Filtrar solo pedidos activos de hoy/ayer
+    orders = [
+        o for o in orders
+        if o.get("estado", "activo") == "activo"
+        and o.get("fecha", "") in (hoy_iso, ayer_iso)
+    ]
+
+    resultado = {
+        "pendientes": [],
+        "total_revisados": len(orders),
+        "ya_en_sistema": 0,
+    }
+
+    if not orders:
+        return resultado
+
+    # Set de numeros Bsale existentes en OPERACION DIARIA
+    existing_bsale = {
+        str(p.get("Pedido Bsale", ""))
+        for p in all_pedidos if p.get("Pedido Bsale")
+    }
+
+    # Set de direcciones normalizadas de OPERACION DIARIA para hoy/ayer
+    # (si la planilla ya paso el pedido a OPERACION DIARIA, la direccion estara)
+    dirs_en_sistema = set()
+    for p in all_pedidos:
+        if p.get("Fecha") in (fecha, fecha_ayer):
+            dir_norm = _normalize_address(p.get("Direccion", ""))
+            if dir_norm:
+                dirs_en_sistema.add(dir_norm)
+
+    # Leer planilla Kowen para hoy y ayer (fuente de verdad operativa)
+    dirs_en_planilla = set()
+    try:
+        service = _get_service()
+        result = service.spreadsheets().values().get(
+            spreadsheetId=PLANILLA_REPARTO_ID,
+            range="'PRIMER TURNO'!A:B",
+        ).execute()
+        for row in result.get("values", []):
+            if len(row) < 2:
+                continue
+            row_fecha = row[0].strip() if row[0] else ""
+            row_dir = row[1].strip() if len(row) > 1 else ""
+            if row_fecha in (fecha, fecha_ayer) and row_dir and row_dir != "DIRECCION":
+                # Normalizar quitando posible depto/comuna en la misma celda
+                base_dir = row_dir
+                for sep in [" Dep/Ofi. ", " dpto ", " Dpto ", " OF ", " Of ", " piso "]:
+                    if sep in base_dir:
+                        base_dir = base_dir.split(sep, 1)[0].strip()
+                        break
+                if "," in base_dir:
+                    base_dir = base_dir.rsplit(",", 1)[0].strip()
+                dir_norm = _normalize_address(base_dir)
+                if dir_norm:
+                    dirs_en_planilla.add(dir_norm)
+    except Exception:
+        # Si no podemos leer la planilla, igual reportamos pendientes por numero Bsale
+        pass
+
+    for o in orders:
+        bsale_nro = str(o.get("pedido_nro", ""))
+        dir_norm = _normalize_address(o.get("direccion", ""))
+
+        if bsale_nro in existing_bsale or dir_norm in dirs_en_sistema:
+            resultado["ya_en_sistema"] += 1
+            continue
+
+        if dir_norm in dirs_en_planilla:
+            # Esta en la planilla pero aun no pasado a OPERACION DIARIA
+            # El paso sync_from_planilla_reparto lo incorporara → no es pendiente
+            resultado["ya_en_sistema"] += 1
+            continue
+
+        resultado["pendientes"].append({
+            "pedido_nro": bsale_nro,
+            "fecha": o.get("fecha", ""),
+            "cliente": o.get("cliente", ""),
+            "direccion": o.get("direccion", ""),
+            "depto": o.get("depto", ""),
+            "comuna": o.get("comuna", ""),
+            "cantidad": o.get("cantidad", 0),
+            "marca": o.get("marca", "KOWEN"),
+        })
+
+    return resultado
+
+
 def sync_from_bsale(orders, fecha_destino=None):
     """
     Importa pedidos de Bsale a OPERACION DIARIA evitando duplicados.
@@ -962,8 +1183,6 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
     parts = fecha.split("/")
     hoy_dt = datetime(int(parts[2]), int(parts[1]), int(parts[0]))
     hoy_api = hoy_dt.strftime("%Y-%m-%d")
-    desde_dt = hoy_dt - timedelta(days=days_back)
-    desde_api = desde_dt.strftime("%Y-%m-%d")
 
     resultado = {
         "fecha": fecha,
@@ -988,6 +1207,25 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
         return resultado
 
     resultado["total_verificados"] = len(pendientes)
+
+    # Ampliar days_back dinamicamente al pedido pendiente mas antiguo, para
+    # detectar PODs de pedidos estancados de semanas atras.
+    max_dias_pendiente = days_back
+    for p in pendientes:
+        fp_str = p.get("Fecha", "")
+        if not fp_str:
+            continue
+        try:
+            fp = fp_str.split("/")
+            fecha_p = datetime(int(fp[2]), int(fp[1]), int(fp[0]))
+            dias = (hoy_dt - fecha_p).days
+            if dias > max_dias_pendiente:
+                max_dias_pendiente = dias
+        except (ValueError, IndexError):
+            pass
+    days_back = min(max_dias_pendiente + 1, 60)  # cap en 60 dias por seguridad
+    desde_dt = hoy_dt - timedelta(days=days_back)
+    desde_api = desde_dt.strftime("%Y-%m-%d")
 
     # --- Recopilar planes unicos ---
     planes = set()
@@ -1043,21 +1281,21 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
         except Exception:
             pass
 
-    # --- Obtener PODs del rango ---
+    # --- Obtener PODs del rango (en tramos <=5 dias, la API da 403 con rangos mas largos) ---
     all_pods = []
-    try:
-        pods_data = drivin_client.get_pods(desde_api, hoy_api)
-        all_pods = pods_data.get("response", [])
-    except Exception:
-        # Intentar en tramos si falla
+    MAX_TRAMO = 5  # dias
+    tramo_inicio = desde_dt
+    while tramo_inicio < hoy_dt:
+        tramo_fin = min(tramo_inicio + timedelta(days=MAX_TRAMO - 1), hoy_dt)
         try:
-            mid_dt = desde_dt + timedelta(days=days_back // 2)
-            mid_api = mid_dt.strftime("%Y-%m-%d")
-            p1 = drivin_client.get_pods(desde_api, mid_api)
-            p2 = drivin_client.get_pods(mid_api, hoy_api)
-            all_pods = p1.get("response", []) + p2.get("response", [])
+            tramo_data = drivin_client.get_pods(
+                tramo_inicio.strftime("%Y-%m-%d"),
+                tramo_fin.strftime("%Y-%m-%d"),
+            )
+            all_pods.extend(tramo_data.get("response", []))
         except Exception:
             pass
+        tramo_inicio = tramo_fin + timedelta(days=1)
 
     # Indexar PODs por address_code y por direccion normalizada
     pods_by_code = {}
@@ -1227,7 +1465,8 @@ def rutina_diaria(fecha_hoy=None):
         "no_entregados_ayer": 0,
         "movidos_a_hoy": 0,
         "duplicados_eliminados": 0,
-        "bsale_importados": 0,
+        "bsale_importados": 0,   # deprecado: ya no se importa Bsale automaticamente
+        "bsale_pendientes": [],  # pedidos Bsale sin reflejo en planilla / operacion diaria
         "planilla_importados": 0,
         "cactus_importados": 0,
         "codigos_asignados": 0,
@@ -1325,28 +1564,14 @@ def rutina_diaria(fecha_hoy=None):
                 except Exception:
                     pass
 
-    # --- PASO 4: Importar pedidos web de Bsale ---
+    # --- PASO 4: Revisar Bsale vs planilla (alerta, NO importar) ---
+    # Regla del negocio: la planilla Kowen manda. Los pedidos web se pasan
+    # manualmente a la planilla antes de ser operativos. Aqui solo alertamos.
     try:
-        import bsale_client
-        # Obtener ultimo numero Bsale en el sistema
-        all_pedidos = get_pedidos()
-        bsale_nums = [int(p.get("Pedido Bsale", "0") or "0") for p in all_pedidos]
-        since = max(bsale_nums) if bsale_nums else 0
-
-        orders = bsale_client.get_web_orders(since_number=since)
-        if orders:
-            # Filtrar: solo pedidos de hoy o ayer (no arrastrar viejos)
-            parts_h = fecha_hoy.split("/")
-            hoy_iso = f"{parts_h[2]}-{parts_h[1]}-{parts_h[0]}"
-            ayer_iso = ayer_dt.strftime("%Y-%m-%d")
-            orders = [o for o in orders if o.get("fecha", "") in (hoy_iso, ayer_iso)]
-
-            if orders:
-                # Usar la fecha real del pedido Bsale (no forzar a hoy)
-                count = sync_from_bsale(orders, fecha_destino=None)
-                resultado["bsale_importados"] = count
+        bsale_check = check_bsale_pendientes(fecha=fecha_hoy)
+        resultado["bsale_pendientes"] = bsale_check.get("pendientes", [])
     except Exception as e:
-        resultado["errores"].append(f"Error importando Bsale: {e}")
+        resultado["errores"].append(f"Error revisando Bsale: {e}")
 
     # --- PASO 5: Importar desde planilla reparto ---
     try:

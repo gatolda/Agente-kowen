@@ -264,6 +264,17 @@ async def rutina_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if resultado["errores"]:
             errores_text = "\n*Advertencias:*\n" + "\n".join(f"- {e}" for e in resultado["errores"])
 
+        bsale_pend = resultado.get("bsale_pendientes", [])
+        bsale_alerta = ""
+        if bsale_pend:
+            bsale_alerta = f"\n\n*Bsale sin planilla: {len(bsale_pend)}*\n"
+            bsale_alerta += "\n".join(
+                f"  #{p.get('pedido_nro', '')} {p.get('direccion', '')[:30]} ({p.get('cantidad', 0)})"
+                for p in bsale_pend[:8]
+            )
+            if len(bsale_pend) > 8:
+                bsale_alerta += f"\n  ...y {len(bsale_pend) - 8} mas"
+
         text = (
             f"*Rutina completada*\n\n"
             f"*Ayer ({resultado['fecha_ayer']}):*\n"
@@ -271,11 +282,12 @@ async def rutina_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"  Movidos a hoy: {resultado['movidos_a_hoy']}\n"
             f"  Duplicados eliminados: {resultado['duplicados_eliminados']}\n\n"
             f"*Hoy ({resultado['fecha_hoy']}):*\n"
-            f"  Bsale: +{resultado['bsale_importados']}\n"
             f"  Planilla: +{resultado['planilla_importados']}\n"
+            f"  Cactus: +{resultado.get('cactus_importados', 0)}\n"
             f"  Codigos: {resultado['codigos_asignados']}\n"
             f"  Driv.in: {resultado.get('drivin_subidos', 0)} subidos\n"
             f"  Plan: {resultado.get('drivin_plan', 'N/A')}"
+            f"{bsale_alerta}"
             f"{errores_text}"
         )
 
@@ -468,15 +480,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             fecha = datetime.now().strftime("%d/%m/%Y")
             resultado = operations.rutina_diaria(fecha_hoy=fecha)
+            bsale_pend = resultado.get("bsale_pendientes", [])
             text = (
                 f"*Rutina completada*\n\n"
                 f"Ayer: {resultado['entregados_ayer']} entregados, "
                 f"{resultado['movidos_a_hoy']} movidos\n"
-                f"Hoy: +{resultado['bsale_importados']} Bsale, "
-                f"+{resultado['planilla_importados']} planilla\n"
+                f"Hoy: +{resultado['planilla_importados']} planilla, "
+                f"+{resultado.get('cactus_importados', 0)} Cactus\n"
                 f"Codigos: {resultado['codigos_asignados']} | "
                 f"Driv.in: {resultado.get('drivin_subidos', 0)}"
             )
+            if bsale_pend:
+                text += f"\nBsale sin planilla: {len(bsale_pend)}"
             if resultado["errores"]:
                 text += "\n\n*Errores:*\n" + "\n".join(f"- {e}" for e in resultado["errores"])
             await msg.edit_text(text, parse_mode="Markdown")
