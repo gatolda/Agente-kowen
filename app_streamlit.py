@@ -1952,6 +1952,172 @@ with tab_rep:
         k5.metric("Botellones", kpis["botellones"],
                   delta=f"K {kpis['kowen']} · C {kpis['cactus']}", delta_color="off")
 
+    # ============ RUTA DEL DIA (progreso + tabla color-coded) ============
+    st.markdown("---")
+    st.markdown("### 🚚 Ruta del día")
+
+    try:
+        ruta = _reports.get_ruta_del_dia(rep_fecha_str)
+    except Exception as e:
+        st.error(f"Error leyendo ruta del dia: {e}")
+        ruta = {"pedidos": [], "stats": {}, "scenario": {"existe": False}, "solo_en_drivin": []}
+
+    pedidos_ruta = ruta["pedidos"]
+    # Filtrar por marca si aplica
+    if rep_marca != "Todas":
+        pedidos_ruta = [p for p in pedidos_ruta if (p.get("marca", "") or "").lower() == rep_marca.lower()]
+    stats = ruta["stats"]
+    scenario = ruta["scenario"]
+
+    # --- Estado del scenario drivin (solo informativo) ---
+    if scenario.get("existe"):
+        st.caption(
+            f"Plan driv.in: **{scenario['description']}**  ·  estado `{scenario.get('status','?')}`"
+            f"  ·  token `{(scenario.get('token') or '')[:12]}…`"
+        )
+    else:
+        st.caption("Sin plan driv.in asociado a esta fecha.")
+
+    # --- Barra de progreso "entregados y pagados" sobre total ---
+    total = stats.get("total", 0)
+    if total:
+        completos = stats.get("completos", 0)
+        entregados = stats.get("entregados", 0)
+        en_camino = stats.get("en_camino", 0)
+        pendientes = stats.get("pendientes", 0)
+        no_entr = stats.get("no_entregados", 0)
+        por_cobrar = stats.get("por_cobrar", 0)
+
+        pct_completos = int(round(completos / total * 100))
+        pct_entregados = int(round(entregados / total * 100))
+
+        # Barra stacked simulada con CSS (completos verde-oscuro, entregados-sin-pagar verde-claro,
+        # en camino azul, no entregado rojo, pendiente gris)
+        def _pct(n): return (n / total * 100) if total else 0
+        seg_completo = _pct(completos)
+        seg_entregado_sin_pagar = _pct(entregados - completos)
+        seg_en_camino = _pct(en_camino)
+        seg_no_entr = _pct(no_entr)
+        seg_pendiente = max(0, 100 - (seg_completo + seg_entregado_sin_pagar + seg_en_camino + seg_no_entr))
+
+        st.markdown(f"""
+        <div style="background:#1a1a1a; border-radius:8px; padding:14px 18px; margin:6px 0 14px;">
+            <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:10px;">
+                <div style="font-size:18px; font-weight:700; color:#fff;">
+                    {completos}/{total} pedidos completos
+                    <span style="color:#888; font-weight:400; font-size:13px; margin-left:8px;">(entregado + pagado)</span>
+                </div>
+                <div style="font-size:24px; font-weight:700; color:{'#22c55e' if pct_completos >= 80 else '#f59e0b' if pct_completos >= 40 else '#ef4444'};">
+                    {pct_completos}%
+                </div>
+            </div>
+            <div style="display:flex; width:100%; height:14px; border-radius:7px; overflow:hidden; background:#2a2a2a;">
+                <div style="width:{seg_completo}%; background:#16a34a;" title="Entregado + pagado"></div>
+                <div style="width:{seg_entregado_sin_pagar}%; background:#86efac;" title="Entregado sin pagar"></div>
+                <div style="width:{seg_en_camino}%; background:#3b82f6;" title="En camino"></div>
+                <div style="width:{seg_no_entr}%; background:#ef4444;" title="No entregado"></div>
+                <div style="width:{seg_pendiente}%; background:#525252;" title="Pendiente"></div>
+            </div>
+            <div style="display:flex; gap:18px; margin-top:10px; font-size:12px; color:#d4d4d8;">
+                <span>🟩 Completos <b style="color:#fff;">{completos}</b></span>
+                <span>🟢 Entregado sin pagar <b style="color:#fff;">{entregados - completos}</b></span>
+                <span>🟦 En camino <b style="color:#fff;">{en_camino}</b></span>
+                <span>🟥 No entregado <b style="color:#fff;">{no_entr}</b></span>
+                <span>⬜ Pendiente <b style="color:#fff;">{pendientes}</b></span>
+                <span style="margin-left:auto;">Por cobrar <b style="color:#f59e0b;">${por_cobrar:,.0f}</b></span>
+            </div>
+        </div>
+        """.replace(",", "."), unsafe_allow_html=True)
+
+    # --- Alerta: pedidos en drivin que no estan en planilla ---
+    solo_drivin = ruta.get("solo_en_drivin", [])
+    if solo_drivin:
+        with st.expander(f"⚠️ {len(solo_drivin)} pedido(s) en driv.in sin reflejo en planilla", expanded=False):
+            st.caption("Estos pedidos fueron cargados directo en driv.in, no aparecen en OPERACION DIARIA. Importalos desde el tab Salud si corresponde.")
+            import pandas as pd
+            st.dataframe(pd.DataFrame(solo_drivin), use_container_width=True, hide_index=True)
+
+    # --- Tabla listado completo con colores por estado ---
+    if not pedidos_ruta:
+        st.info("No hay pedidos para esta fecha.")
+    else:
+        # Render filas como HTML table para controlar colores
+        def _row_style(r):
+            est = r["estado"]
+            pago = r["estado_pago"]
+            if est == "ENTREGADO" and pago == "PAGADO":
+                return "background:rgba(22,163,74,0.22); border-left:4px solid #16a34a;"
+            if est == "ENTREGADO":
+                return "background:rgba(134,239,172,0.18); border-left:4px solid #86efac;"
+            if est == "EN CAMINO":
+                return "background:rgba(59,130,246,0.15); border-left:4px solid #3b82f6;"
+            if est == "NO ENTREGADO":
+                return "background:rgba(239,68,68,0.18); border-left:4px solid #ef4444;"
+            return "background:rgba(148,163,184,0.08); border-left:4px solid #64748b;"
+
+        def _badge_estado(est):
+            cmap = {
+                "ENTREGADO": ("#16a34a", "ENTREGADO"),
+                "EN CAMINO": ("#3b82f6", "EN CAMINO"),
+                "PENDIENTE": ("#64748b", "PENDIENTE"),
+                "NO ENTREGADO": ("#ef4444", "NO ENTREGADO"),
+            }
+            color, label = cmap.get(est, ("#64748b", est or "—"))
+            return f'<span style="background:{color}; color:#fff; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600; letter-spacing:0.03em;">{label}</span>'
+
+        def _badge_pago(est_pago, est_ped):
+            if est_pago == "PAGADO":
+                return '<span style="background:#15803d; color:#fff; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600;">PAGADO ✓</span>'
+            if est_ped == "ENTREGADO":
+                return '<span style="background:#f59e0b; color:#0a0a0a; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:700;">POR COBRAR</span>'
+            return '<span style="color:#888; font-size:11px;">—</span>'
+
+        rows_html = []
+        for r in pedidos_ruta:
+            dir_display = r["direccion"]
+            if r.get("depto"):
+                dir_display += f", {r['depto']}"
+            marca_emoji = "🌵" if "cactus" in (r.get("marca","") or "").lower() else "💧"
+            drivin_flag = "" if r.get("en_drivin") else ' <span title="No está en drivin" style="color:#f59e0b;">⚠</span>'
+            monto_str = f"${r['monto']:,.0f}".replace(",", ".")
+            rows_html.append(f"""
+            <tr style="{_row_style(r)}">
+                <td style="padding:8px 10px; font-family:monospace; color:#cbd5e1;">#{r['numero']}{drivin_flag}</td>
+                <td style="padding:8px 10px;">{marca_emoji} <b>{r['cliente'] or '—'}</b></td>
+                <td style="padding:8px 10px; color:#cbd5e1;">{dir_display}</td>
+                <td style="padding:8px 10px; color:#cbd5e1;">{r['comuna'] or '—'}</td>
+                <td style="padding:8px 10px; text-align:center; font-family:monospace; color:#e2e8f0;">{r['cantidad'] or '—'}</td>
+                <td style="padding:8px 10px; color:#cbd5e1;">{r['repartidor'] or '—'}</td>
+                <td style="padding:8px 10px;">{_badge_estado(r['estado'])}</td>
+                <td style="padding:8px 10px;">{_badge_pago(r['estado_pago'], r['estado'])}</td>
+                <td style="padding:8px 10px; font-family:monospace; color:#e2e8f0; text-align:right;">{monto_str}</td>
+            </tr>
+            """)
+
+        table_html = f"""
+        <div style="max-height:620px; overflow-y:auto; border:1px solid #27272a; border-radius:6px;">
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead style="position:sticky; top:0; background:#0f0f10; z-index:1;">
+                <tr style="text-align:left; color:#9ca3af; border-bottom:1px solid #27272a;">
+                    <th style="padding:10px; font-size:11px; letter-spacing:0.08em; text-transform:uppercase;">#</th>
+                    <th style="padding:10px; font-size:11px; letter-spacing:0.08em; text-transform:uppercase;">Cliente</th>
+                    <th style="padding:10px; font-size:11px; letter-spacing:0.08em; text-transform:uppercase;">Dirección</th>
+                    <th style="padding:10px; font-size:11px; letter-spacing:0.08em; text-transform:uppercase;">Comuna</th>
+                    <th style="padding:10px; font-size:11px; letter-spacing:0.08em; text-transform:uppercase; text-align:center;">Cant</th>
+                    <th style="padding:10px; font-size:11px; letter-spacing:0.08em; text-transform:uppercase;">Repartidor</th>
+                    <th style="padding:10px; font-size:11px; letter-spacing:0.08em; text-transform:uppercase;">Estado</th>
+                    <th style="padding:10px; font-size:11px; letter-spacing:0.08em; text-transform:uppercase;">Pago</th>
+                    <th style="padding:10px; font-size:11px; letter-spacing:0.08em; text-transform:uppercase; text-align:right;">Monto</th>
+                </tr>
+            </thead>
+            <tbody>{''.join(rows_html)}</tbody>
+        </table>
+        </div>
+        """
+        st.markdown(table_html, unsafe_allow_html=True)
+
+    st.markdown("---")
+
     # --- Panel Pedidos sin cobrar ---
     total_sin_cobrar = sum(len(v) for v in sin_cobrar.values())
     total_monto_sc = sum(p["monto_estimado"] for bucket in sin_cobrar.values() for p in bucket)

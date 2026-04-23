@@ -175,3 +175,163 @@ def get_pagos_recibidos(fecha_str):
     fecha_str: "DD/MM/YYYY"
     """
     return sheets_client.get_pagos(fecha_str)
+
+
+def _iso_date(fecha_ddmmyyyy):
+    """'DD/MM/YYYY' -> 'YYYY-MM-DD'. Retorna None si falla."""
+    parts = (fecha_ddmmyyyy or "").split("/")
+    if len(parts) != 3:
+        return None
+    try:
+        return f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}"
+    except Exception:
+        return None
+
+
+def get_ruta_del_dia(fecha_str):
+    """
+    Devuelve la ruta operativa del dia cruzando OPERACION DIARIA con el
+    scenario drivin del dia (solo lectura, no modifica nada).
+
+    Returns:
+        Dict con:
+          - pedidos: lista de dicts con campos
+                (numero, fecha, direccion, depto, comuna, cliente, telefono,
+                 cantidad, marca, codigo_drivin, repartidor, estado, estado_pago,
+                 forma_pago, monto, observaciones, origen, en_drivin)
+            ordenados: entregados+pagados al final, resto por estado.
+          - stats: {total, pendientes, en_camino, entregados, no_entregados,
+                    pagados, por_cobrar, completos}
+          - scenario: {existe, description, token, status} del plan drivin
+          - solo_en_drivin: pedidos presentes en el scenario sin fila en
+                            OPERACION DIARIA (address_code, description, units)
+    """
+    pedidos = sheets_client.get_pedidos(fecha_str)
+
+    # Intentar leer scenario drivin del dia (best-effort; si falla, seguimos)
+    scenario_info = {"existe": False, "description": "", "token": "", "status": ""}
+    drivin_codes = set()
+    solo_en_drivin = []
+    api_date = _iso_date(fecha_str)
+    if api_date:
+        try:
+            import drivin_client
+            scenarios = drivin_client.get_scenarios_by_date(api_date).get("response", []) or []
+            # Preferimos el scenario que termina en "API" (creado por el agente),
+            # si no hay cualquier scenario del dia.
+            chosen = None
+            for s in scenarios:
+                if str(s.get("description", "")).endswith("API"):
+                    chosen = s
+                    break
+            if not chosen and scenarios:
+                chosen = scenarios[0]
+
+            if chosen:
+                token = chosen.get("token") or chosen.get("scenario_token", "")
+                scenario_info = {
+                    "existe": True,
+                    "description": chosen.get("description", ""),
+                    "token": token,
+                    "status": chosen.get("status", ""),
+                }
+                if token:
+                    orders = drivin_client.get_orders(token).get("response", []) or []
+                    for o in orders:
+                        code = (o.get("code", "") or "").strip()
+                        if code:
+                            drivin_codes.add(code)
+
+                    # Codigos que no aparecen en pedidos planilla
+                    planilla_codes = {
+                        (p.get("Codigo Drivin", "") or "").strip() for p in pedidos
+                        if (p.get("Codigo Drivin", "") or "").strip()
+                    }
+                    for o in orders:
+                        code = (o.get("code", "") or "").strip()
+                        if not code or code in planilla_codes:
+                            continue
+                        nested = (o.get("orders") or [{}])[0]
+                        solo_en_drivin.append({
+                            "codigo_drivin": code,
+                            "direccion": o.get("address_1", ""),
+                            "comuna": o.get("area_level_3", ""),
+                            "descripcion": nested.get("description", ""),
+                            "cantidad": nested.get("units_1", 0) or 0,
+                        })
+        except Exception:
+            # Si drivin no responde, el reporte sigue funcionando con planilla sola
+            pass
+
+    # Armar vista unificada
+    out = []
+    for p in pedidos:
+        codigo = (p.get("Codigo Drivin", "") or "").strip()
+        out.append({
+            "numero": p.get("#", ""),
+            "fecha": p.get("Fecha", ""),
+            "direccion": p.get("Direccion", ""),
+            "depto": p.get("Depto", ""),
+            "comuna": p.get("Comuna", ""),
+            "cliente": p.get("Cliente", ""),
+            "telefono": p.get("Telefono", ""),
+            "cantidad": p.get("Cant", ""),
+            "marca": p.get("Marca", ""),
+            "codigo_drivin": codigo,
+            "repartidor": p.get("Repartidor", ""),
+            "estado": _estado(p) or "PENDIENTE",
+            "estado_pago": _pago_estado(p) or "PENDIENTE",
+            "forma_pago": p.get("Forma Pago", ""),
+            "monto": _monto_pedido(p),
+            "observaciones": p.get("Observaciones", ""),
+            "canal": p.get("Canal", ""),
+            "origen": "planilla",
+            "en_drivin": bool(codigo and codigo in drivin_codes),
+        })
+
+    # Orden: PENDIENTE -> EN CAMINO -> NO ENTREGADO -> ENTREGADO(pendiente pago) -> COMPLETO
+    def _orden_key(r):
+        est = r["estado"]
+        pag = r["estado_pago"]
+        completo = est == "ENTREGADO" and pag == "PAGADO"
+        if completo:
+            return (4, r["numero"])
+        if est == "ENTREGADO":
+            return (3, r["numero"])
+        if est == "NO ENTREGADO":
+            return (2, r["numero"])
+        if est == "EN CAMINO":
+            return (1, r["numero"])
+        return (0, r["numero"])
+    out.sort(key=_orden_key)
+
+    # Stats
+    stats = {
+        "total": len(out),
+        "pendientes": sum(1 for r in out if r["estado"] == "PENDIENTE"),
+        "en_camino": sum(1 for r in out if r["estado"] == "EN CAMINO"),
+        "entregados": sum(1 for r in out if r["estado"] == "ENTREGADO"),
+        "no_entregados": sum(1 for r in out if r["estado"] == "NO ENTREGADO"),
+        "pagados": sum(1 for r in out if r["estado_pago"] == "PAGADO"),
+        "por_cobrar": sum(
+            r["monto"] for r in out
+            if r["estado"] == "ENTREGADO" and r["estado_pago"] != "PAGADO"
+        ),
+        "completos": sum(
+            1 for r in out
+            if r["estado"] == "ENTREGADO" and r["estado_pago"] == "PAGADO"
+        ),
+    }
+    stats["pct_entregados"] = (
+        round(stats["entregados"] / stats["total"] * 100) if stats["total"] else 0
+    )
+    stats["pct_completos"] = (
+        round(stats["completos"] / stats["total"] * 100) if stats["total"] else 0
+    )
+
+    return {
+        "pedidos": out,
+        "stats": stats,
+        "scenario": scenario_info,
+        "solo_en_drivin": solo_en_drivin,
+    }
