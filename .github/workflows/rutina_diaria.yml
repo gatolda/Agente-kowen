@@ -2,13 +2,10 @@ name: Rutina Diaria Kowen
 
 on:
   schedule:
-    # Corre 3 veces al dia (hora Chile CLT=UTC-4 en otono/invierno).
-    # 9:00 AM -> apertura + entregados de ayer
-    # 13:00   -> mitad de dia, clientes van llegando a planilla
-    # 17:00   -> corte oficial, ultimo barrido antes de cerrar
-    - cron: '0 13 * * *'
-    - cron: '0 17 * * *'
-    - cron: '0 21 * * *'
+    # Corre cada hora en horario laboral Chile (9:00 - 19:00, CLT=UTC-4).
+    # 13-23 UTC = 9 AM - 7 PM Chile. 11 corridas / dia.
+    # Reemplaza al daemon de Railway que caia cada tanto.
+    - cron: '0 13-23 * * 1-5'
   workflow_dispatch:  # Permite ejecutar manualmente desde GitHub
 
 jobs:

@@ -139,29 +139,49 @@ def ejecutar_rutina():
     total = len(pedidos_hoy)
     total_bot = sum(int(p.get("Cant", 0) or 0) for p in pedidos_hoy)
 
-    msg = (
-        f"*Rutina diaria completada*\n\n"
-        f"*{hoy}*: {total} pedidos, {total_bot} botellones\n"
-        f"Planilla: +{resultado['planilla_importados']}\n"
-        f"Cactus: +{resultado.get('cactus_importados', 0)}\n"
-        f"Codigos: {resultado['codigos_asignados']}\n"
-        f"driv.in: {resultado.get('drivin_subidos', 0)} subidos"
+    # Notificar por Telegram SOLO si hay novedad (evita spam con 11 corridas/dia).
+    # Siempre pingeamos healthcheck para señal de liveness.
+    planilla = resultado['planilla_importados']
+    cactus = resultado.get('cactus_importados', 0)
+    codigos = resultado['codigos_asignados']
+    subidos = resultado.get('drivin_subidos', 0)
+    verif = resultado.get('verificacion', {})
+    cambios_drivin = verif.get('actualizados', 0) if isinstance(verif, dict) else 0
+    movidos = resultado.get('movidos_a_hoy', 0)
+
+    hay_novedad = bool(
+        planilla or cactus or subidos or cambios_drivin or movidos
+        or bsale_pend or resultado["errores"]
     )
 
-    # Alertar de pedidos Bsale que no estan en la planilla
-    if bsale_pend:
-        msg += f"\n\n*{len(bsale_pend)} pedidos Bsale sin planilla:*"
-        for p in bsale_pend[:8]:
-            dir_str = p.get("direccion", "")[:30]
-            msg += f"\n- #{p.get('pedido_nro', '')} {dir_str} ({p.get('cantidad', 0)})"
-        if len(bsale_pend) > 8:
-            msg += f"\n...y {len(bsale_pend) - 8} mas"
-        msg += "\n_Pasar a la planilla para operar._"
+    if hay_novedad:
+        msg = f"*Rutina {hoy}*: {total} pedidos, {total_bot} botellones"
+        if planilla or cactus:
+            msg += f"\nImportados: Kowen +{planilla}, Cactus +{cactus}"
+        if codigos:
+            msg += f"\nCodigos asignados: {codigos}"
+        if subidos:
+            msg += f"\ndriv.in: {subidos} subidos"
+        if cambios_drivin:
+            msg += (f"\nVerificacion driv.in: {cambios_drivin} actualizados"
+                    f" ({verif.get('entregados_detectados', 0)} entregados)")
+        if movidos:
+            msg += f"\nMovidos a hoy: {movidos}"
 
-    if resultado["errores"]:
-        msg += "\n\n*Advertencias:*\n" + "\n".join(f"- {e}" for e in resultado["errores"])
+        if bsale_pend:
+            msg += f"\n\n*{len(bsale_pend)} Bsale sin planilla:*"
+            for p in bsale_pend[:8]:
+                dir_str = p.get("direccion", "")[:30]
+                msg += f"\n- #{p.get('pedido_nro', '')} {dir_str} ({p.get('cantidad', 0)})"
+            if len(bsale_pend) > 8:
+                msg += f"\n...y {len(bsale_pend) - 8} mas"
+            msg += "\n_Pasar a la planilla._"
 
-    notificar(msg)
+        if resultado["errores"]:
+            msg += "\n\n*Advertencias:*\n" + "\n".join(f"- {e}" for e in resultado["errores"])
+
+        notificar(msg)
+
     observability.ping_healthcheck(msg=f"rutina {hoy} ok")
     log.info("=== FIN RUTINA ===")
 
