@@ -1009,6 +1009,69 @@ with tab_op:
             st.dataframe(df_s[["numero", "fecha", "direccion", "comuna"]],
                          use_container_width=True, hide_index=True)
 
+        # --- Sincronizacion con drivin (Opcion C selectiva) ---
+        st.markdown("---")
+        st.markdown("##### 🔄 Sincronizar planilla con plan driv.in")
+        st.caption(
+            "Borra pedidos PENDIENTE sin reflejo en drivin (residuos) y crea los que "
+            "estan en drivin sin planilla. **No toca** drivin, ni pedidos ENTREGADO/PAGADO/"
+            "NO ENTREGADO."
+        )
+
+        if st.button("🔍 Simular sincronización (dry-run)", key="btn_sync_dryrun", use_container_width=True):
+            with st.spinner("Consultando drivin y comparando con planilla..."):
+                try:
+                    plan = operations.sync_operacion_con_drivin(fecha=op_fecha_str, dry_run=True)
+                    st.session_state["_sync_plan"] = plan
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+        plan = st.session_state.get("_sync_plan", None)
+        if plan and not plan.get("ejecutado"):
+            st.info(
+                f"**Plan del dry-run para {plan['fecha']}:**\n\n"
+                f"- Scenario drivin: `{plan['scenario'] or '(ninguno)'}`\n"
+                f"- Pedidos en planilla hoy: **{plan['total_planilla_antes']}**\n"
+                f"- Orders en drivin: **{plan['total_drivin']}**\n"
+                f"- A preservar (histórico + pendientes OK): **{len(plan['a_preservar'])}**\n"
+                f"- 🗑 A borrar (residuos pendientes): **{len(plan['a_borrar'])}**\n"
+                f"- ➕ A crear (drivin sin planilla): **{len(plan['a_crear'])}**\n\n"
+                f"Total después: **{len(plan['a_preservar']) + len(plan['a_crear'])}** pedidos"
+            )
+
+            if plan["a_borrar"]:
+                with st.expander(f"🗑 Ver los {len(plan['a_borrar'])} que se borrarían", expanded=False):
+                    df_b = pd.DataFrame([
+                        {"#": p.get("#", ""), "Cliente": p.get("Cliente", "") or "—",
+                         "Dirección": p.get("Direccion", ""), "Comuna": p.get("Comuna", ""),
+                         "Código": p.get("Codigo Drivin", "") or "(sin código)",
+                         "Estado": p.get("Estado Pedido", "")}
+                        for p in plan["a_borrar"]
+                    ])
+                    st.dataframe(df_b, use_container_width=True, hide_index=True)
+
+            if plan["a_crear"]:
+                with st.expander(f"➕ Ver los {len(plan['a_crear'])} que se crearían", expanded=False):
+                    df_c = pd.DataFrame(plan["a_crear"])
+                    st.dataframe(df_c, use_container_width=True, hide_index=True)
+
+            st.warning(
+                "⚠️ Si aplicás, **no hay deshacer** — los pedidos borrados quedarán eliminados. "
+                "Revisá las listas antes de confirmar."
+            )
+            if st.button("✓ APLICAR sincronización (destructivo)",
+                         key="btn_sync_apply", type="primary", use_container_width=True):
+                with st.spinner("Aplicando cambios..."):
+                    try:
+                        r = operations.sync_operacion_con_drivin(fecha=op_fecha_str, dry_run=False)
+                        st.success(
+                            f"✓ Hecho. Borrados: **{r['borrados_ok']}** · Creados: **{r['creados_ok']}**"
+                        )
+                        st.session_state.pop("_sync_plan", None)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al aplicar: {e}")
+
     # ------------ SUB-TAB COBROS ------------
     with sub_cobros:
         # Por cobrar hoy (entregados sin pago)

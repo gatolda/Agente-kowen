@@ -587,6 +587,179 @@ def importar_bsale_a_operacion(pedido_bsale, codigo_drivin, fecha_destino=None,
     }
 
 
+def sync_operacion_con_drivin(fecha=None, dry_run=True):
+    """
+    Sincroniza OPERACION DIARIA con el scenario drivin de la fecha (Opcion C).
+
+    Logica:
+      - Pedidos ENTREGADO/NO ENTREGADO/PAGADO -> preservar (historico inmutable)
+      - Pedidos PENDIENTE con codigo drivin presente en el scenario -> preservar
+      - Pedidos PENDIENTE sin reflejo en drivin -> borrar (residuos de dias previos)
+      - Orders en drivin sin pedido en planilla -> crear pedido nuevo
+
+    NO modifica nada en drivin. Solo lee de drivin y escribe en la planilla.
+
+    Args:
+        fecha: DD/MM/YYYY. Default: hoy.
+        dry_run: Si True (default), no aplica cambios. Solo devuelve el plan.
+
+    Returns:
+        Dict con {fecha, scenario, total_planilla_antes, total_drivin,
+                  a_borrar [list of pedidos dict], a_crear [list of nuevos],
+                  a_preservar [list], ejecutado, borrados_ok, creados_ok}.
+    """
+    import drivin_client
+    import sheets_client
+
+    if not fecha:
+        fecha = config.now().strftime("%d/%m/%Y")
+
+    parts = fecha.split("/")
+    if len(parts) != 3:
+        raise ValueError(f"Fecha invalida: {fecha}")
+    api_date = f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}"
+
+    # 1. Leer pedidos de la planilla para la fecha
+    pedidos_planilla = get_pedidos(fecha)
+
+    # 2. Leer scenario drivin de la fecha
+    scenarios = drivin_client.get_scenarios_by_date(api_date).get("response", []) or []
+    chosen = None
+    for s in scenarios:
+        if str(s.get("description", "")).endswith("API"):
+            chosen = s
+            break
+    if not chosen and scenarios:
+        chosen = scenarios[0]
+
+    orders_drivin = []
+    scenario_desc = ""
+    if chosen:
+        token = chosen.get("token") or chosen.get("scenario_token", "")
+        scenario_desc = chosen.get("description", "")
+        if token:
+            orders_drivin = drivin_client.get_orders(token).get("response", []) or []
+
+    drivin_codes = set()
+    for o in orders_drivin:
+        code = (o.get("code", "") or "").strip()
+        if code:
+            drivin_codes.add(code)
+
+    # 3. Clasificar pedidos de la planilla
+    a_borrar = []
+    a_preservar = []
+    planilla_codes = set()
+
+    for p in pedidos_planilla:
+        estado = (p.get("Estado Pedido", "") or "").upper().strip()
+        pago = (p.get("Estado Pago", "") or "").upper().strip()
+        codigo = (p.get("Codigo Drivin", "") or "").strip()
+
+        # Preservar cualquier estado distinto a PENDIENTE (historico)
+        if estado and estado != "PENDIENTE":
+            a_preservar.append(p)
+            if codigo:
+                planilla_codes.add(codigo)
+            continue
+
+        # Preservar si esta pagado aunque sea pendiente
+        if pago == "PAGADO":
+            a_preservar.append(p)
+            if codigo:
+                planilla_codes.add(codigo)
+            continue
+
+        # PENDIENTE + no PAGADO: comparar con drivin
+        if codigo and codigo in drivin_codes:
+            a_preservar.append(p)
+            planilla_codes.add(codigo)
+        else:
+            a_borrar.append(p)
+
+    # 4. Orders en drivin sin equivalente en planilla
+    a_crear = []
+    for o in orders_drivin:
+        code = (o.get("code", "") or "").strip()
+        if not code or code in planilla_codes:
+            continue
+        nested = (o.get("orders") or [{}])[0]
+        cantidad = 0
+        try:
+            cantidad = int(float(nested.get("units_1", 0) or 0))
+        except (ValueError, TypeError):
+            cantidad = 0
+        marca_raw = (nested.get("description", "") or "KOWEN").split(" ")[0].upper()
+        if "CACTUS" in marca_raw:
+            marca = "CACTUS"
+        else:
+            marca = "KOWEN"
+        a_crear.append({
+            "codigo_drivin": code,
+            "direccion": o.get("address_1", ""),
+            "depto": (o.get("address_2", "") or "").strip(),
+            "comuna": o.get("area_level_3", ""),
+            "cantidad": cantidad,
+            "marca": marca,
+            "order_code_drivin": nested.get("code", ""),
+        })
+
+    resultado = {
+        "dry_run": dry_run,
+        "fecha": fecha,
+        "scenario": scenario_desc,
+        "total_planilla_antes": len(pedidos_planilla),
+        "total_drivin": len(orders_drivin),
+        "a_borrar": a_borrar,
+        "a_preservar": a_preservar,
+        "a_crear": a_crear,
+        "ejecutado": False,
+        "borrados_ok": 0,
+        "creados_ok": 0,
+    }
+
+    if dry_run:
+        return resultado
+
+    # 5. Ejecutar: borrar pendientes residuales + crear los nuevos de drivin
+    borrados = 0
+    for p in a_borrar:
+        nro_str = str(p.get("#", "")).strip()
+        if not nro_str.isdigit():
+            continue
+        try:
+            sheets_client.delete_pedido(int(nro_str))
+            borrados += 1
+        except Exception as e:
+            log.warning("Fallo borrar pedido #%s: %s", nro_str, e)
+
+    creados = 0
+    for c in a_crear:
+        try:
+            sheets_client.add_pedido({
+                "fecha": fecha,
+                "direccion": c["direccion"],
+                "depto": c["depto"],
+                "comuna": c["comuna"],
+                "codigo_drivin": c["codigo_drivin"],
+                "cant": c["cantidad"],
+                "marca": c["marca"],
+                "documento": "Boleta",
+                "canal": "DRIVIN",
+                "estado_pedido": "PENDIENTE",
+                "estado_pago": "PENDIENTE",
+                "plan_drivin": scenario_desc,
+            })
+            creados += 1
+        except Exception as e:
+            log.warning("Fallo crear pedido drivin %s: %s", c["codigo_drivin"], e)
+
+    resultado["ejecutado"] = True
+    resultado["borrados_ok"] = borrados
+    resultado["creados_ok"] = creados
+    return resultado
+
+
 def sync_from_bsale(orders, fecha_destino=None):
     """
     Importa pedidos de Bsale a OPERACION DIARIA evitando duplicados.
