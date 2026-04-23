@@ -1589,19 +1589,16 @@ with tab_salud:
             if st.button("Bsale: pedidos sin planilla", key="btn_bsale_pend", use_container_width=True):
                 with st.spinner("Consultando Bsale..."):
                     try:
-                        pend = operations.check_bsale_pendientes()
-                        st.session_state["_bsale_pend"] = pend
+                        r = operations.check_bsale_pendientes()
+                        pendientes = r.get("pendientes", [])
+                        # Pre-computar sugerencias una sola vez
+                        enriched = []
+                        for p in pendientes:
+                            sug = operations.sugerir_codigo_bsale(p)
+                            enriched.append({**p, "_sug": sug})
+                        st.session_state["_bsale_pend"] = enriched
                     except Exception as e:
                         st.error(f"Error: {e}")
-            pend = st.session_state.get("_bsale_pend", None)
-            if pend is not None:
-                if pend:
-                    st.warning(f"{len(pend)} pedido(s) Bsale sin pasar a planilla")
-                    import pandas as pd
-                    st.dataframe(pd.DataFrame(pend)[["pedido_nro", "direccion", "comuna", "cantidad", "fecha"]],
-                                 use_container_width=True, hide_index=True)
-                else:
-                    st.success("Bsale al dia.")
 
         with c2:
             if st.button("driv.in: planes sin despachar", key="btn_drivin_pend", use_container_width=True):
@@ -1621,6 +1618,103 @@ with tab_salud:
                     st.dataframe(pd.DataFrame(planes), use_container_width=True, hide_index=True)
                 else:
                     st.success("Todos los planes iniciados.")
+
+        # --- Detalle Bsale pendientes con sugerencia + boton importar ---
+        pendientes = st.session_state.get("_bsale_pend", None)
+        if pendientes is not None:
+            if not pendientes:
+                st.success("Bsale al dia — sin pedidos pendientes.")
+            else:
+                st.markdown(f"##### {len(pendientes)} pedido(s) Bsale sin importar")
+                st.caption("Verifica el codigo drivin sugerido y clickea Importar. El pedido queda en OPERACION DIARIA y se sube al plan drivin del dia si existe.")
+
+                for i, p in enumerate(pendientes):
+                    sug = p.get("_sug", {}) or {}
+                    conf = sug.get("confianza", "none")
+                    sug_code = sug.get("codigo", "") or ""
+                    candidatos = sug.get("candidatos", []) or []
+
+                    badge_icon = {"auto": "✅", "memory": "🧠", "ambiguous": "⚠️", "none": "❓"}.get(conf, "❓")
+                    badge_text = {
+                        "auto": "match automatico alta confianza",
+                        "memory": "aprendido de correccion previa",
+                        "ambiguous": "varios candidatos — elegir",
+                        "none": "sin match — ingresar manualmente",
+                    }.get(conf, "sin match")
+
+                    with st.container(border=True):
+                        top = st.columns([3, 1])
+                        with top[0]:
+                            st.markdown(
+                                f"**Bsale #{p.get('pedido_nro','?')}** · {p.get('cliente','')[:30]}"
+                                f"  —  {p.get('cantidad',0)} bot {p.get('marca','KOWEN')}"
+                            )
+                            dir_str = p.get("direccion","")
+                            if p.get("depto"):
+                                dir_str += f", dpto {p['depto']}"
+                            if p.get("comuna"):
+                                dir_str += f"  ·  {p['comuna']}"
+                            st.caption(dir_str)
+
+                        with top[1]:
+                            st.caption(f"{badge_icon} {badge_text}")
+
+                        # Campo codigo: selectbox si ambiguo, text_input en otro caso
+                        bot_col = st.columns([2, 1])
+                        with bot_col[0]:
+                            if conf == "ambiguous" and candidatos:
+                                opts = [f"{c.code} — {c.name} ({c.city})" for c in candidatos]
+                                opts = ["(escribir codigo manualmente)"] + opts
+                                sel = st.selectbox(
+                                    "Codigo drivin",
+                                    opts,
+                                    key=f"bsale_sel_{i}",
+                                    label_visibility="collapsed",
+                                )
+                                if sel == opts[0]:
+                                    codigo_in = st.text_input(
+                                        "Codigo manual",
+                                        key=f"bsale_man_{i}",
+                                        label_visibility="collapsed",
+                                        placeholder="Escribir codigo drivin",
+                                    )
+                                else:
+                                    codigo_in = candidatos[opts.index(sel) - 1].code
+                            else:
+                                codigo_in = st.text_input(
+                                    "Codigo drivin",
+                                    value=sug_code,
+                                    key=f"bsale_code_{i}",
+                                    label_visibility="collapsed",
+                                    placeholder="Escribir codigo drivin",
+                                )
+
+                        with bot_col[1]:
+                            if st.button(
+                                "Importar",
+                                key=f"bsale_import_{i}",
+                                use_container_width=True,
+                                type="primary",
+                                disabled=not codigo_in,
+                            ):
+                                try:
+                                    r = operations.importar_bsale_a_operacion(
+                                        pedido_bsale=p,
+                                        codigo_drivin=codigo_in.strip(),
+                                    )
+                                    msg = f"#{r['numero']} importado"
+                                    if r["subido_drivin"]:
+                                        msg += " + subido a driv.in"
+                                    else:
+                                        msg += f" (drivin: {r['motivo_no_subido']})"
+                                    st.success(msg)
+                                    # Quitar el importado de la lista
+                                    st.session_state["_bsale_pend"] = [
+                                        x for j, x in enumerate(pendientes) if j != i
+                                    ]
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error: {e}")
 
 with tab_lotes:
     import pandas as pd

@@ -446,9 +446,145 @@ def check_bsale_pendientes(fecha=None):
             "comuna": o.get("comuna", ""),
             "cantidad": o.get("cantidad", 0),
             "marca": o.get("marca", "KOWEN"),
+            "telefono": o.get("telefono", ""),
+            "email": o.get("email", ""),
         })
 
     return resultado
+
+
+def sugerir_codigo_bsale(pedido_bsale):
+    """
+    Dada una fila del output de check_bsale_pendientes(), sugiere un codigo
+    drivin usando address_matcher.auto_match.
+
+    Returns:
+        Dict con {codigo, confianza, candidatos}.
+            confianza: 'auto' | 'memory' | 'ambiguous' | 'none'
+            candidatos: lista de Match si ambiguous, [] en otros casos
+    """
+    import address_matcher
+    addrs = address_matcher.load_cache()
+    res, conf = address_matcher.auto_match(
+        direccion=pedido_bsale.get("direccion", ""),
+        depto=pedido_bsale.get("depto", ""),
+        comuna=pedido_bsale.get("comuna", ""),
+        addresses=addrs,
+    )
+    if conf == "ambiguous":
+        return {"codigo": "", "confianza": conf, "candidatos": res or []}
+    return {"codigo": res or "", "confianza": conf, "candidatos": []}
+
+
+def importar_bsale_a_operacion(pedido_bsale, codigo_drivin, fecha_destino=None,
+                                 subir_a_drivin=True):
+    """
+    Importa un pedido Bsale a OPERACION DIARIA con el codigo drivin dado.
+    Si subir_a_drivin y existe un scenario para la fecha, tambien agrega el
+    pedido al plan drivin del dia.
+
+    Args:
+        pedido_bsale: Dict del check_bsale_pendientes (pedido_nro, direccion,
+            depto, comuna, cantidad, marca, cliente, telefono, email, fecha).
+        codigo_drivin: Codigo (puede ser el sugerido o uno corregido).
+        fecha_destino: DD/MM/YYYY. Default: hoy.
+        subir_a_drivin: Si True y hay scenario para la fecha, sube el order.
+
+    Returns:
+        Dict con {numero, subido_drivin, scenario_token, motivo_no_subido}.
+    """
+    import sheets_client
+    import drivin_client
+    import address_matcher
+    from log_client import log_match_manual
+
+    if not fecha_destino:
+        fecha_destino = config.now().strftime("%d/%m/%Y")
+
+    marca = (pedido_bsale.get("marca", "KOWEN") or "KOWEN").upper()
+    cantidad = pedido_bsale.get("cantidad", 0) or 0
+
+    # Guardar aprendizaje del match manual si el usuario corrigio
+    sugerencia = sugerir_codigo_bsale(pedido_bsale)
+    if (codigo_drivin and codigo_drivin != sugerencia.get("codigo")
+            and sugerencia.get("confianza") in ("ambiguous", "none")):
+        try:
+            address_matcher.save_memory_entry(
+                pedido_bsale.get("direccion", ""), codigo_drivin
+            )
+            log_match_manual(pedido_bsale.get("direccion", ""), codigo_drivin)
+        except Exception as e:
+            log.warning("Fallo guardar match manual: %s", e)
+
+    # 1. Agregar a OPERACION DIARIA
+    num = sheets_client.add_pedido({
+        "fecha": fecha_destino,
+        "direccion": pedido_bsale.get("direccion", ""),
+        "depto": pedido_bsale.get("depto", ""),
+        "comuna": pedido_bsale.get("comuna", ""),
+        "codigo_drivin": codigo_drivin,
+        "cant": cantidad,
+        "marca": marca,
+        "documento": "Boleta",
+        "canal": "WEB",
+        "cliente": pedido_bsale.get("cliente", ""),
+        "telefono": pedido_bsale.get("telefono", ""),
+        "email": pedido_bsale.get("email", ""),
+        "observaciones": "",
+        "pedido_bsale": str(pedido_bsale.get("pedido_nro", "")),
+        "estado_pedido": "PENDIENTE",
+        "estado_pago": "PENDIENTE",
+    })
+
+    # 2. Intentar subir al scenario drivin del dia (si existe y hay codigo)
+    subido = False
+    scenario_token = ""
+    motivo = ""
+
+    if not subir_a_drivin:
+        motivo = "subir_a_drivin=False"
+    elif not codigo_drivin:
+        motivo = "sin codigo drivin"
+    else:
+        try:
+            parts = fecha_destino.split("/")
+            api_date = f"{parts[2]}-{parts[1]}-{parts[0]}"
+            suffix = f"{parts[1]}{parts[0]}"
+            plan_name = f"{fecha_destino}API"
+
+            scenarios = drivin_client.get_scenarios_by_date(api_date).get("response", [])
+            for s in scenarios:
+                if s.get("description") == plan_name:
+                    scenario_token = s.get("token", s.get("scenario_token", ""))
+                    break
+
+            if scenario_token:
+                desc = f"{marca} - Retiro" if cantidad == 0 else marca
+                clients = [{
+                    "code": codigo_drivin,
+                    "orders": [{
+                        "code": f"{codigo_drivin}-{suffix}",
+                        "description": desc,
+                        "units_1": cantidad,
+                    }],
+                }]
+                drivin_client.create_orders(clients=clients, scenario_token=scenario_token)
+                subido = True
+                # Marcar el pedido con el plan
+                sheets_client.update_pedidos_batch([(num, {"plan_drivin": plan_name})])
+            else:
+                motivo = f"no existe scenario {plan_name} (rutina diaria lo creara en la proxima corrida)"
+        except Exception as e:
+            motivo = f"error subiendo a drivin: {e}"
+            log.warning("Fallo subir pedido Bsale #%s a drivin: %s",
+                        pedido_bsale.get("pedido_nro", ""), e)
+
+    return {
+        "numero": num,
+        "subido_drivin": subido,
+        "scenario_token": scenario_token,
+        "motivo_no_subido": motivo,
+    }
 
 
 def sync_from_bsale(orders, fecha_destino=None):
