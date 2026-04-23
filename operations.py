@@ -722,41 +722,49 @@ def sync_operacion_con_drivin(fecha=None, dry_run=True):
         return resultado
 
     # 5. Ejecutar: borrar pendientes residuales + crear los nuevos de drivin
-    borrados = 0
-    for p in a_borrar:
-        nro_str = str(p.get("#", "")).strip()
-        if not nro_str.isdigit():
-            continue
-        try:
-            sheets_client.delete_pedido(int(nro_str))
-            borrados += 1
-        except Exception as e:
-            log.warning("Fallo borrar pedido #%s: %s", nro_str, e)
+    # Todo en BATCH para no pasar rate limit de Sheets API (60 requests/min).
+    errores = []
 
-    creados = 0
-    for c in a_crear:
+    # Borrar todos en 1 sola llamada (read + batchUpdate)
+    borrados = 0
+    nros_a_borrar = [str(p.get("#", "")).strip() for p in a_borrar
+                     if str(p.get("#", "")).strip().isdigit()]
+    if nros_a_borrar:
         try:
-            sheets_client.add_pedido({
-                "fecha": fecha,
-                "direccion": c["direccion"],
-                "depto": c["depto"],
-                "comuna": c["comuna"],
-                "codigo_drivin": c["codigo_drivin"],
-                "cant": c["cantidad"],
-                "marca": c["marca"],
-                "documento": "Boleta",
-                "canal": "DRIVIN",
-                "estado_pedido": "PENDIENTE",
-                "estado_pago": "PENDIENTE",
-                "plan_drivin": scenario_desc,
-            })
-            creados += 1
+            borrados = sheets_client.delete_pedidos_batch(nros_a_borrar)
         except Exception as e:
-            log.warning("Fallo crear pedido drivin %s: %s", c["codigo_drivin"], e)
+            log.warning("Fallo batch delete: %s", e)
+            errores.append(f"borrados: {e}")
+
+    # Crear todos en 1 sola llamada (append batch)
+    creados = 0
+    nuevos_pedidos = [{
+        "fecha": fecha,
+        "direccion": c["direccion"],
+        "depto": c["depto"],
+        "comuna": c["comuna"],
+        "codigo_drivin": c["codigo_drivin"],
+        "cant": c["cantidad"],
+        "marca": c["marca"],
+        "documento": "Boleta",
+        "canal": "DRIVIN",
+        "estado_pedido": "PENDIENTE",
+        "estado_pago": "PENDIENTE",
+        "plan_drivin": scenario_desc,
+    } for c in a_crear]
+    if nuevos_pedidos:
+        try:
+            nums = sheets_client.add_pedidos(nuevos_pedidos)
+            creados = len(nums)
+        except Exception as e:
+            log.warning("Fallo batch create: %s", e)
+            errores.append(f"creados: {e}")
 
     resultado["ejecutado"] = True
     resultado["borrados_ok"] = borrados
     resultado["creados_ok"] = creados
+    if errores:
+        resultado["errores"] = errores
     return resultado
 
 

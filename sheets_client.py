@@ -305,6 +305,59 @@ def _pedido_to_row(num, pedido):
     ]
 
 
+def delete_pedidos_batch(row_numbers):
+    """
+    Elimina varios pedidos en UNA sola llamada a Sheets API.
+    Args:
+        row_numbers: Lista de numeros de pedido (#) a eliminar.
+    Returns:
+        Cantidad eliminada.
+    """
+    if not row_numbers:
+        return 0
+    targets = set(str(n).strip() for n in row_numbers if str(n).strip())
+    rows = _read_sheet(TAB_OPERACION, "!A:A")
+    rows_to_del = []
+    for i, row in enumerate(rows):
+        if i == 0:
+            continue
+        if row and str(row[0]).strip() in targets:
+            rows_to_del.append(i)  # 0-based sheet row index
+
+    if not rows_to_del:
+        return 0
+
+    # Obtener sheetId real de la tab OPERACION DIARIA
+    service = _get_service()
+    meta = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    sheet_id = None
+    for s in meta.get("sheets", []):
+        if s["properties"]["title"] == TAB_OPERACION:
+            sheet_id = s["properties"]["sheetId"]
+            break
+    if sheet_id is None:
+        raise RuntimeError(f"Tab {TAB_OPERACION} no encontrada")
+
+    # Borrar de mayor a menor para no desplazar indices
+    rows_to_del.sort(reverse=True)
+    requests = [{
+        "deleteDimension": {
+            "range": {
+                "sheetId": sheet_id,
+                "dimension": "ROWS",
+                "startIndex": r,
+                "endIndex": r + 1,
+            }
+        }
+    } for r in rows_to_del]
+
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"requests": requests},
+    ).execute()
+    return len(rows_to_del)
+
+
 def delete_pedido(row_number):
     """
     Elimina un pedido de OPERACION DIARIA.
