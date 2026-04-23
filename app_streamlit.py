@@ -1524,146 +1524,353 @@ with chat_col:
 
 st.markdown("---")
 
-tab_salud, tab_lotes, tab_rep, tab_cl, tab_pg, tab_cr, tab_sync, tab_log = st.tabs([
-    "🚨 Salud", "📋 Carga rapida", "📊 Reporte", "👥 Clientes", "💰 Pagos", "📧 Correos", "🔄 Sync driv.in", "🗂 Log",
+tab_op, tab_lotes, tab_cl, tab_cr, tab_sync, tab_log = st.tabs([
+    "🚨 Operación", "📋 Carga rápida", "👥 Clientes", "📧 Correos", "🔄 Sync driv.in", "🗂 Log",
 ])
 
-with tab_salud:
-    st.markdown("##### Salud del sistema")
-    st.caption("Todo lo que requiere accion humana, en un solo lugar.")
+with tab_op:
+    import reports as _reports
+    import pandas as pd
 
-    col_ref, col_dias = st.columns([1, 1])
-    with col_ref:
-        if st.button("Refrescar", key="btn_salud_refresh", use_container_width=True):
+    # =========== Controles superiores (fijos) ===========
+    ctl1, ctl2, ctl3 = st.columns([1.2, 1, 2])
+    with ctl1:
+        op_fecha = st.date_input("Fecha", value=datetime.now().date(), key="op_fecha")
+    with ctl2:
+        op_marca = st.selectbox("Marca", ["Todas", "Kowen", "Cactus"], key="op_marca")
+    with ctl3:
+        st.write("")
+        if st.button("🔄 Refrescar datos", key="btn_op_refresh", use_container_width=True):
             st.rerun()
-    with col_dias:
-        dias_est = st.number_input("Dias para marcar estancado", min_value=1, max_value=15, value=2, key="salud_dias_est")
+    op_fecha_str = op_fecha.strftime("%d/%m/%Y")
+
+    # =========== Cargar datos ===========
+    try:
+        ruta = _reports.get_ruta_del_dia(op_fecha_str)
+    except Exception as e:
+        st.error(f"Error leyendo ruta del dia: {e}")
+        ruta = {"pedidos": [], "stats": {}, "scenario": {"existe": False}, "solo_en_drivin": []}
 
     try:
-        diag = operations.diagnostico_salud(dias_estancado=int(dias_est))
+        diag = operations.diagnostico_salud(dias_estancado=2)
     except Exception as e:
-        st.error(f"Error cargando diagnostico: {e}")
+        st.warning(f"No se pudo leer diagnostico de salud: {e}")
         diag = None
 
-    if diag:
-        # --- KPIs ---
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("Total pedidos", diag["total_pedidos"])
-        k2.metric("Estancados", len(diag["estancados"]),
-                  delta=None if not diag["estancados"] else "accion", delta_color="inverse")
-        k3.metric("Huerfanos PAGADO", len(diag["huerfanos"]),
-                  delta=None if not diag["huerfanos"] else "accion", delta_color="inverse")
-        k4.metric("PAGOS sin pedido", len(diag["pagos_sin_pedido"]),
-                  delta=None if not diag["pagos_sin_pedido"] else "accion", delta_color="inverse")
-        k5.metric("Sin codigo", len(diag["pendientes_sin_codigo"]),
-                  delta=None if not diag["pendientes_sin_codigo"] else "accion", delta_color="inverse")
+    pedidos_ruta = ruta["pedidos"]
+    if op_marca != "Todas":
+        pedidos_ruta = [p for p in pedidos_ruta if (p.get("marca", "") or "").lower() == op_marca.lower()]
+    stats = ruta["stats"]
+    scenario = ruta["scenario"]
 
-        # --- Totales por estado ---
-        if diag["totales_por_estado"]:
-            partes = [f"**{k}**: {v}" for k, v in sorted(diag["totales_por_estado"].items(), key=lambda x: -x[1])]
-            st.caption(" · ".join(partes))
+    # =========== Alert bar (issues accionables) ===========
+    issues = []
+    if diag:
+        if diag["huerfanos"]:
+            issues.append(f"💸 {len(diag['huerfanos'])} huérfanos de pago")
+        if diag["estancados"]:
+            issues.append(f"🕰 {len(diag['estancados'])} estancados ≥2d")
+        if diag["pagos_sin_pedido"]:
+            issues.append(f"❓ {len(diag['pagos_sin_pedido'])} pagos sin pedido")
+        if diag["pendientes_sin_codigo"]:
+            issues.append(f"🔖 {len(diag['pendientes_sin_codigo'])} sin código drivin")
+    solo_drivin_count = len(ruta.get("solo_en_drivin", []))
+    if solo_drivin_count:
+        issues.append(f"⚠ {solo_drivin_count} pedidos en driv.in sin planilla")
+
+    if issues:
+        st.warning("  ·  ".join(issues) + "  →  ver en sub-tab *Cobros* o *Adquisición*")
+
+    # =========== KPI strip (botellones) ===========
+    total_ped = stats.get("total", 0)
+    bot_total = stats.get("botellones_total", 0)
+    bot_entr = stats.get("botellones_entregados", 0)
+    bot_cob = stats.get("botellones_cobrados", 0)
+    bot_pc = stats.get("botellones_por_cobrar", 0)
+    por_cobrar_monto = stats.get("por_cobrar", 0)
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Pedidos del día", total_ped,
+              delta=f"{bot_total} botellones", delta_color="off")
+    k2.metric("Botellones ENTREGADOS",
+              f"{bot_entr} / {bot_total}",
+              delta=f"{stats.get('pct_bot_entregados', 0)}%")
+    k3.metric("Botellones COBRADOS",
+              f"{bot_cob} / {bot_total}",
+              delta=f"{stats.get('pct_bot_cobrados', 0)}%")
+    k4.metric("Por cobrar",
+              f"{bot_pc} botellones",
+              delta=f"${por_cobrar_monto:,.0f}".replace(",", "."),
+              delta_color="inverse")
+
+    # =========== Sub-tabs ===========
+    sub_hoy, sub_plan, sub_cobros, sub_adq, sub_hist = st.tabs([
+        "📋 Hoy", "🚚 Plan driv.in", "💰 Cobros", "📥 Adquisición", "📈 Histórico",
+    ])
+
+    # ------------ SUB-TAB HOY (listado principal) ------------
+    with sub_hoy:
+        if not pedidos_ruta:
+            st.info("No hay pedidos para esta fecha.")
+        else:
+            def _row_bg(r):
+                est = r["estado"]; pago = r["estado_pago"]
+                if est == "ENTREGADO" and pago == "PAGADO":
+                    return "background:rgba(22,163,74,0.15);"
+                if est == "ENTREGADO":
+                    return "background:rgba(134,239,172,0.10);"
+                if est == "EN CAMINO":
+                    return "background:rgba(59,130,246,0.10);"
+                if est == "NO ENTREGADO":
+                    return "background:rgba(239,68,68,0.12);"
+                return ""
+
+            def _badge(text, color):
+                return (f'<span style="background:{color}; color:#fff; padding:2px 8px; '
+                        f'border-radius:10px; font-size:11px; font-weight:600;">{text}</span>')
+
+            def _estado_cell(est):
+                cmap = {
+                    "ENTREGADO": "#16a34a", "EN CAMINO": "#3b82f6",
+                    "PENDIENTE": "#64748b", "NO ENTREGADO": "#ef4444",
+                }
+                return _badge(est or "—", cmap.get(est, "#64748b"))
+
+            def _pago_cell(pago, est):
+                if pago == "PAGADO":
+                    return _badge("PAGADO ✓", "#15803d")
+                if est == "ENTREGADO":
+                    return _badge("POR COBRAR", "#f59e0b")
+                return '<span style="color:#888; font-size:11px;">—</span>'
+
+            rows_html = []
+            for r in pedidos_ruta:
+                dir_display = r["direccion"] + (f", {r['depto']}" if r.get("depto") else "")
+                monto_str = f"${r['monto']:,.0f}".replace(",", ".")
+                rows_html.append(f"""
+                <tr style="{_row_bg(r)}">
+                    <td style="padding:7px 10px; font-family:monospace; color:#cbd5e1;">#{r['numero']}</td>
+                    <td style="padding:7px 10px;"><b>{r['cliente'] or '—'}</b></td>
+                    <td style="padding:7px 10px; color:#cbd5e1;">{dir_display}</td>
+                    <td style="padding:7px 10px; color:#cbd5e1;">{r['comuna'] or '—'}</td>
+                    <td style="padding:7px 10px; text-align:center;">{r['cantidad'] or '—'}</td>
+                    <td style="padding:7px 10px; color:#cbd5e1;">{r['repartidor'] or '—'}</td>
+                    <td style="padding:7px 10px;">{_estado_cell(r['estado'])}</td>
+                    <td style="padding:7px 10px;">{_pago_cell(r['estado_pago'], r['estado'])}</td>
+                    <td style="padding:7px 10px; font-family:monospace; text-align:right;">{monto_str}</td>
+                </tr>
+                """)
+
+            st.markdown(f"""
+            <div style="max-height:640px; overflow-y:auto; border:1px solid #27272a; border-radius:6px;">
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead style="position:sticky; top:0; background:#0f0f10;">
+                    <tr style="text-align:left; color:#9ca3af; border-bottom:1px solid #27272a;">
+                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">#</th>
+                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">Cliente</th>
+                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">Dirección</th>
+                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">Comuna</th>
+                        <th style="padding:10px; font-size:11px; text-transform:uppercase; text-align:center;">Cant</th>
+                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">Repartidor</th>
+                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">Estado</th>
+                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">Pago</th>
+                        <th style="padding:10px; font-size:11px; text-transform:uppercase; text-align:right;">Monto</th>
+                    </tr>
+                </thead>
+                <tbody>{''.join(rows_html)}</tbody>
+            </table>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ------------ SUB-TAB PLAN DRIV.IN ------------
+    with sub_plan:
+        if scenario.get("existe"):
+            sc1, sc2, sc3 = st.columns(3)
+            sc1.metric("Plan", scenario.get("description", "—"))
+            sc2.metric("Estado", scenario.get("status", "?"))
+            sc3.metric("Pedidos en el plan", sum(1 for p in pedidos_ruta if p.get("en_drivin")))
+            st.caption(f"Token: `{(scenario.get('token') or '')[:20]}…`")
+        else:
+            st.info(f"Sin plan driv.in asociado a {op_fecha_str}.")
+
+        # Planes sin despachar (consulta bajo demanda)
+        st.markdown("---")
+        if st.button("🔍 Verificar planes sin despachar en driv.in", key="btn_plan_chk", use_container_width=True):
+            with st.spinner("Consultando driv.in..."):
+                try:
+                    v = operations.verify_orders_drivin(fecha=op_fecha_str, auto_update=False)
+                    st.session_state["_drivin_v"] = v
+                except Exception as e:
+                    st.error(f"Error: {e}")
+        v = st.session_state.get("_drivin_v", None)
+        if v is not None:
+            planes = v.get("planes_sin_despachar", [])
+            if planes:
+                st.warning(f"{len(planes)} plan(es) sin despachar")
+                st.dataframe(pd.DataFrame(planes), use_container_width=True, hide_index=True)
+            else:
+                st.success("Todos los planes iniciados.")
+
+        # Pedidos sin codigo driv.in
+        if diag and diag["pendientes_sin_codigo"]:
+            st.markdown("---")
+            st.markdown(f"##### 🔖 Pendientes sin código driv.in ({len(diag['pendientes_sin_codigo'])})")
+            df_s = pd.DataFrame(diag["pendientes_sin_codigo"])
+            st.dataframe(df_s[["numero", "fecha", "direccion", "comuna"]],
+                         use_container_width=True, hide_index=True)
+
+    # ------------ SUB-TAB COBROS ------------
+    with sub_cobros:
+        # Por cobrar hoy (entregados sin pago)
+        por_cobrar_pedidos = [r for r in pedidos_ruta
+                              if r["estado"] == "ENTREGADO" and r["estado_pago"] != "PAGADO"]
+        pagados_hoy_pedidos = [r for r in pedidos_ruta if r["estado_pago"] == "PAGADO"]
+
+        ck1, ck2 = st.columns(2)
+        ck1.metric("Por cobrar hoy",
+                   f"{len(por_cobrar_pedidos)} pedidos",
+                   delta=f"${sum(r['monto'] for r in por_cobrar_pedidos):,.0f}".replace(",", "."),
+                   delta_color="inverse")
+        ck2.metric("Cobrados hoy",
+                   f"{len(pagados_hoy_pedidos)} pedidos",
+                   delta=f"${sum(r['monto'] for r in pagados_hoy_pedidos):,.0f}".replace(",", "."))
 
         st.markdown("---")
 
-        # --- Estancados ---
-        if diag["estancados"]:
-            with st.expander(f"🕰 Estancados ({len(diag['estancados'])}) — pedidos PENDIENTE con ≥{dias_est} dias", expanded=True):
-                import pandas as pd
-                df_e = pd.DataFrame(diag["estancados"])
-                st.dataframe(df_e[["numero", "fecha", "dias", "direccion", "cliente", "codigo"]],
-                             use_container_width=True, hide_index=True)
+        # Por cobrar — acciones rápidas
+        if por_cobrar_pedidos:
+            st.markdown(f"##### 💰 Por cobrar ({len(por_cobrar_pedidos)})")
+            def _wa_link(telefono, cliente, pedido, monto):
+                import urllib.parse
+                tel = "".join(c for c in str(telefono or "") if c.isdigit())
+                if not tel:
+                    return None
+                if not tel.startswith("56"):
+                    tel = "56" + tel.lstrip("0")
+                msg = (f"Hola {cliente}, te escribimos de Kowen por el pedido #{pedido}. "
+                       f"Quedo pendiente el cobro de ${monto:,.0f}. Gracias!").replace(",", ".")
+                return f"https://wa.me/{tel}?text={urllib.parse.quote(msg)}"
 
-        # --- Huerfanos ---
-        if diag["huerfanos"]:
-            with st.expander(f"💸 Huerfanos ({len(diag['huerfanos'])}) — marcados PAGADO sin fila en PAGOS", expanded=False):
-                import pandas as pd
+            for p in por_cobrar_pedidos:
+                col = st.columns([0.6, 2, 2.2, 1, 1, 0.9, 1.3])
+                col[0].markdown(f"**#{p['numero']}**")
+                col[1].write(p["cliente"] or "—")
+                dir_p = p["direccion"] + (f", {p['depto']}" if p.get("depto") else "")
+                col[2].write(dir_p)
+                col[3].write(p["telefono"] or "—")
+                col[4].write(p.get("forma_pago") or "—")
+                col[5].markdown(f"**${p['monto']:,.0f}**".replace(",", "."))
+                with col[6]:
+                    bc1, bc2 = st.columns(2)
+                    if bc1.button("💵 Pagado", key=f"cob_{p['numero']}", use_container_width=True):
+                        try:
+                            forma = (p.get("forma_pago") or "Transferencia").strip() or "Transferencia"
+                            campo = "efectivo" if "efectivo" in forma.lower() else "transferencia"
+                            updates = {
+                                "estado_pago": "PAGADO",
+                                "fecha_pago": datetime.now().strftime("%d/%m/%Y"),
+                                campo: p["monto"],
+                            }
+                            sheets_client.update_pedido(p["numero"], updates)
+                            st.success(f"#{p['numero']} marcado pagado")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+                    wa = _wa_link(p["telefono"], p["cliente"], p["numero"], p["monto"])
+                    if wa:
+                        bc2.markdown(
+                            f'<a href="{wa}" target="_blank"><button style="width:100%;padding:4px;font-size:11px;border:1px solid #ccc;background:white;border-radius:4px;">💬</button></a>',
+                            unsafe_allow_html=True)
+        else:
+            st.success("Nadie con deuda pendiente hoy.")
+
+        # Huérfanos + pagos sin pedido
+        if diag:
+            if diag["huerfanos"]:
+                st.markdown("---")
+                st.markdown(f"##### 💸 Huérfanos PAGADO ({len(diag['huerfanos'])})")
+                st.caption("Pedidos marcados PAGADO sin fila en PAGOS — verificar si el pago es legítimo.")
                 df_h = pd.DataFrame(diag["huerfanos"])
                 st.dataframe(df_h[["numero", "fecha", "cliente", "forma_pago", "monto"]],
                              use_container_width=True, hide_index=True)
-                st.caption("_Pueden ser ingresos manuales legitimos (efectivo anotado a mano) o errores — revisar._")
 
-        # --- Pagos sin pedido ---
-        if diag["pagos_sin_pedido"]:
-            with st.expander(f"❓ PAGOS sin pedido ({len(diag['pagos_sin_pedido'])}) — pedido# inexistente en OPERACION DIARIA", expanded=False):
-                import pandas as pd
+            if diag["pagos_sin_pedido"]:
+                st.markdown("---")
+                st.markdown(f"##### ❓ PAGOS con pedido# inexistente ({len(diag['pagos_sin_pedido'])})")
                 df_p = pd.DataFrame(diag["pagos_sin_pedido"])
                 st.dataframe(df_p[["pedido_num", "fecha", "monto", "cliente"]],
                              use_container_width=True, hide_index=True)
-                st.caption("_Pedido# mal escrito al crear la fila en PAGOS._")
 
-        # --- Pendientes sin codigo ---
-        if diag["pendientes_sin_codigo"]:
-            with st.expander(f"🔖 Pendientes sin codigo driv.in ({len(diag['pendientes_sin_codigo'])})", expanded=False):
-                import pandas as pd
-                df_s = pd.DataFrame(diag["pendientes_sin_codigo"])
-                st.dataframe(df_s[["numero", "fecha", "direccion", "comuna"]],
-                             use_container_width=True, hide_index=True)
-                st.caption("_Asignar codigo desde la pestaña Reporte o ejecutar la rutina._")
+        # Historial de pagos + formulario (del tab Pagos antiguo)
+        with st.expander("📜 Historial de pagos y registrar nuevo", expanded=False):
+            pagos = sheets_client.get_pagos()
+            if pagos:
+                st.dataframe(pagos, use_container_width=True, hide_index=True, height=280)
+            else:
+                st.info("No hay pagos registrados.")
+            with st.form("form_pago_op"):
+                pc1, pc2 = st.columns(2)
+                with pc1:
+                    pg_monto = st.number_input("Monto", min_value=0, value=0, step=1000)
+                with pc2:
+                    pg_medio = st.selectbox("Medio", ["Efectivo", "Transferencia", "Webpay"])
+                pc3, pc4 = st.columns(2)
+                with pc3:
+                    pg_cl = st.text_input("Cliente", key="pg_cl_op")
+                with pc4:
+                    pg_ref = st.text_input("Referencia", placeholder="Nro operacion")
+                pg_ped = st.text_input("Pedido vinculado (#)", key="pg_ped_op")
+                if st.form_submit_button("Registrar pago", use_container_width=True):
+                    if pg_monto > 0:
+                        sheets_client.add_pago({
+                            "monto": pg_monto, "medio": pg_medio, "cliente": pg_cl,
+                            "referencia": pg_ref, "pedido_vinculado": pg_ped, "estado": "PAGADO",
+                        })
+                        st.success("Pago registrado!")
+                        st.rerun()
 
-        if not any([diag["estancados"], diag["huerfanos"], diag["pagos_sin_pedido"], diag["pendientes_sin_codigo"]]):
-            st.success("Todo al dia — sin acciones pendientes.")
+    # ------------ SUB-TAB ADQUISICIÓN ------------
+    with sub_adq:
+        # Contador por canal del día
+        canales = {}
+        for p in pedidos_ruta:
+            c = (p.get("canal") or "—").strip() or "—"
+            canales[c] = canales.get(c, 0) + 1
+        if canales:
+            partes = [f"**{k}**: {v}" for k, v in sorted(canales.items(), key=lambda x: -x[1])]
+            st.caption("Canales hoy: " + " · ".join(partes))
+            st.markdown("")
 
-        st.markdown("---")
+        # Bsale pendientes — botón + listado con 1-click import
+        st.markdown("##### 🛒 Pedidos Bsale sin importar")
+        if st.button("🔄 Consultar Bsale ahora", key="btn_bsale_pend_op", use_container_width=True):
+            with st.spinner("Consultando Bsale..."):
+                try:
+                    r = operations.check_bsale_pendientes()
+                    pendientes = r.get("pendientes", [])
+                    enriched = []
+                    for p in pendientes:
+                        sug = operations.sugerir_codigo_bsale(p)
+                        enriched.append({**p, "_sug": sug})
+                    st.session_state["_bsale_pend"] = enriched
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
-        # --- APIs externas (bajo demanda, costosas) ---
-        st.markdown("##### Revisiones con APIs externas")
-        st.caption("Bsale, driv.in y Gmail — se consultan bajo demanda porque son lentas.")
-
-        c1, c2 = st.columns(2)
-
-        with c1:
-            if st.button("Bsale: pedidos sin planilla", key="btn_bsale_pend", use_container_width=True):
-                with st.spinner("Consultando Bsale..."):
-                    try:
-                        r = operations.check_bsale_pendientes()
-                        pendientes = r.get("pendientes", [])
-                        # Pre-computar sugerencias una sola vez
-                        enriched = []
-                        for p in pendientes:
-                            sug = operations.sugerir_codigo_bsale(p)
-                            enriched.append({**p, "_sug": sug})
-                        st.session_state["_bsale_pend"] = enriched
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-
-        with c2:
-            if st.button("driv.in: planes sin despachar", key="btn_drivin_pend", use_container_width=True):
-                with st.spinner("Consultando driv.in..."):
-                    try:
-                        hoy_str = datetime.now().strftime("%d/%m/%Y")
-                        v = operations.verify_orders_drivin(fecha=hoy_str, auto_update=False)
-                        st.session_state["_drivin_v"] = v
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-            v = st.session_state.get("_drivin_v", None)
-            if v is not None:
-                planes = v.get("planes_sin_despachar", [])
-                if planes:
-                    st.warning(f"{len(planes)} plan(es) sin despachar")
-                    import pandas as pd
-                    st.dataframe(pd.DataFrame(planes), use_container_width=True, hide_index=True)
-                else:
-                    st.success("Todos los planes iniciados.")
-
-        # --- Detalle Bsale pendientes con sugerencia + boton importar ---
         pendientes = st.session_state.get("_bsale_pend", None)
         if pendientes is not None:
             if not pendientes:
-                st.success("Bsale al dia — sin pedidos pendientes.")
+                st.success("Bsale al día — sin pedidos pendientes.")
             else:
-                st.markdown(f"##### {len(pendientes)} pedido(s) Bsale sin importar")
-                st.caption("Verifica el codigo drivin sugerido y clickea Importar. El pedido queda en OPERACION DIARIA y se sube al plan drivin del dia si existe.")
-
+                st.caption("Verifica el código drivin sugerido y clickea Importar.")
                 for i, p in enumerate(pendientes):
                     sug = p.get("_sug", {}) or {}
                     conf = sug.get("confianza", "none")
                     sug_code = sug.get("codigo", "") or ""
                     candidatos = sug.get("candidatos", []) or []
-
                     badge_icon = {"auto": "✅", "memory": "🧠", "ambiguous": "⚠️", "none": "❓"}.get(conf, "❓")
                     badge_text = {
-                        "auto": "match automatico alta confianza",
-                        "memory": "aprendido de correccion previa",
+                        "auto": "match automático alta confianza",
+                        "memory": "aprendido de corrección previa",
                         "ambiguous": "varios candidatos — elegir",
                         "none": "sin match — ingresar manualmente",
                     }.get(conf, "sin match")
@@ -1681,52 +1888,31 @@ with tab_salud:
                             if p.get("comuna"):
                                 dir_str += f"  ·  {p['comuna']}"
                             st.caption(dir_str)
-
                         with top[1]:
                             st.caption(f"{badge_icon} {badge_text}")
-
-                        # Campo codigo: selectbox si ambiguo, text_input en otro caso
                         bot_col = st.columns([2, 1])
                         with bot_col[0]:
                             if conf == "ambiguous" and candidatos:
                                 opts = [f"{c.code} — {c.name} ({c.city})" for c in candidatos]
-                                opts = ["(escribir codigo manualmente)"] + opts
-                                sel = st.selectbox(
-                                    "Codigo drivin",
-                                    opts,
-                                    key=f"bsale_sel_{i}",
-                                    label_visibility="collapsed",
-                                )
+                                opts = ["(escribir código manualmente)"] + opts
+                                sel = st.selectbox("Código drivin", opts, key=f"bsop_sel_{i}",
+                                                   label_visibility="collapsed")
                                 if sel == opts[0]:
-                                    codigo_in = st.text_input(
-                                        "Codigo manual",
-                                        key=f"bsale_man_{i}",
-                                        label_visibility="collapsed",
-                                        placeholder="Escribir codigo drivin",
-                                    )
+                                    codigo_in = st.text_input("Código manual", key=f"bsop_man_{i}",
+                                                              label_visibility="collapsed",
+                                                              placeholder="Escribir código drivin")
                                 else:
                                     codigo_in = candidatos[opts.index(sel) - 1].code
                             else:
-                                codigo_in = st.text_input(
-                                    "Codigo drivin",
-                                    value=sug_code,
-                                    key=f"bsale_code_{i}",
-                                    label_visibility="collapsed",
-                                    placeholder="Escribir codigo drivin",
-                                )
-
+                                codigo_in = st.text_input("Código drivin", value=sug_code, key=f"bsop_code_{i}",
+                                                          label_visibility="collapsed",
+                                                          placeholder="Escribir código drivin")
                         with bot_col[1]:
-                            if st.button(
-                                "Importar",
-                                key=f"bsale_import_{i}",
-                                use_container_width=True,
-                                type="primary",
-                                disabled=not codigo_in,
-                            ):
+                            if st.button("Importar", key=f"bsop_import_{i}", use_container_width=True,
+                                         type="primary", disabled=not codigo_in):
                                 try:
                                     r = operations.importar_bsale_a_operacion(
-                                        pedido_bsale=p,
-                                        codigo_drivin=codigo_in.strip(),
+                                        pedido_bsale=p, codigo_drivin=codigo_in.strip(),
                                     )
                                     msg = f"#{r['numero']} importado"
                                     if r["subido_drivin"]:
@@ -1734,13 +1920,25 @@ with tab_salud:
                                     else:
                                         msg += f" (drivin: {r['motivo_no_subido']})"
                                     st.success(msg)
-                                    # Quitar el importado de la lista
                                     st.session_state["_bsale_pend"] = [
                                         x for j, x in enumerate(pendientes) if j != i
                                     ]
                                     st.rerun()
                                 except Exception as e:
                                     st.error(f"Error: {e}")
+
+        # Pedidos en drivin sin planilla
+        solo_drivin = ruta.get("solo_en_drivin", [])
+        if solo_drivin:
+            st.markdown("---")
+            st.markdown(f"##### ⚠️ {len(solo_drivin)} pedido(s) en driv.in sin planilla")
+            st.caption("Cargados directo en drivin. Revisá si corresponde importarlos.")
+            st.dataframe(pd.DataFrame(solo_drivin), use_container_width=True, hide_index=True)
+
+    # ------------ SUB-TAB HISTÓRICO ------------
+    with sub_hist:
+        st.info("Próximamente: ventas últimos 7 días, clientes top, comunas top, tasa de entrega.")
+
 
 with tab_lotes:
     import pandas as pd
@@ -1890,148 +2088,6 @@ with tab_lotes:
             st.session_state.pop("clientes_cache", None)
             st.rerun()
 
-with tab_rep:
-    import reports as _reports
-
-    st.markdown("""
-    <style>
-    .rep-hero-header { background: linear-gradient(180deg, rgba(127,29,29,0.18) 0%, transparent 100%);
-        border: 1px solid #7f1d1d; border-left: 4px solid #ef4444;
-        border-radius: 10px; padding: 14px 18px; margin-bottom: 12px; }
-    .rep-hero-header h3 { color: #fca5a5; margin: 0; font-size: 15px; font-weight: 700; }
-    .rep-hero-header .sub { color: #fca5a5; font-size: 13px; opacity: 0.9; }
-    .rep-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
-        color: #888; padding: 14px 0 8px; margin-top: 6px; border-top: 1px dashed #ddd; }
-    .rep-section-title.critical { color: #ef4444; border-top-color: #fca5a5; }
-    .rep-atraso-3 { color: #ef4444; font-weight: 700; background: rgba(239,68,68,0.12);
-        padding: 2px 8px; border-radius: 3px; font-size: 11px; }
-    .rep-atraso-2 { color: #ef4444; font-weight: 700; font-size: 11px; }
-    .rep-atraso-1 { color: #f59e0b; font-weight: 700; font-size: 11px; }
-    .rep-atraso-0 { color: #888; font-size: 11px; }
-    </style>
-    """, unsafe_allow_html=True)
-
-    # --- Controles ---
-    col_fecha, col_marca, col_space = st.columns([1, 1, 3])
-    with col_fecha:
-        rep_fecha = st.date_input("Fecha", value=datetime.now().date(), key="rep_fecha")
-    with col_marca:
-        rep_marca = st.selectbox("Marca", ["Todas", "Kowen", "Cactus"], key="rep_marca")
-
-    rep_fecha_str = rep_fecha.strftime("%d/%m/%Y")
-
-    # --- Cargar ruta del dia ---
-    try:
-        ruta = _reports.get_ruta_del_dia(rep_fecha_str)
-    except Exception as e:
-        st.error(f"Error leyendo ruta del dia: {e}")
-        ruta = {"pedidos": [], "stats": {}, "scenario": {"existe": False}, "solo_en_drivin": []}
-
-    pedidos_ruta = ruta["pedidos"]
-    if rep_marca != "Todas":
-        pedidos_ruta = [p for p in pedidos_ruta if (p.get("marca", "") or "").lower() == rep_marca.lower()]
-    stats = ruta["stats"]
-
-    # --- KPIs: foco en botellones (pedidos + entregados + cobrados) ---
-    total_ped = stats.get("total", 0)
-    bot_total = stats.get("botellones_total", 0)
-    bot_entr = stats.get("botellones_entregados", 0)
-    bot_cob = stats.get("botellones_cobrados", 0)
-    bot_pc = stats.get("botellones_por_cobrar", 0)
-    por_cobrar_monto = stats.get("por_cobrar", 0)
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Pedidos del día", total_ped,
-              delta=f"{bot_total} botellones", delta_color="off")
-    k2.metric("Botellones ENTREGADOS",
-              f"{bot_entr} / {bot_total}",
-              delta=f"{stats.get('pct_bot_entregados', 0)}%")
-    k3.metric("Botellones COBRADOS",
-              f"{bot_cob} / {bot_total}",
-              delta=f"{stats.get('pct_bot_cobrados', 0)}%")
-    k4.metric("Por cobrar",
-              f"{bot_pc} botellones",
-              delta=f"${por_cobrar_monto:,.0f}".replace(",", "."),
-              delta_color="inverse")
-
-    # --- Tabla listado con colores por estado ---
-    st.markdown("")  # spacing
-    if not pedidos_ruta:
-        st.info("No hay pedidos para esta fecha.")
-    else:
-        def _row_bg(r):
-            est = r["estado"]; pago = r["estado_pago"]
-            if est == "ENTREGADO" and pago == "PAGADO":
-                return "background:rgba(22,163,74,0.15);"
-            if est == "ENTREGADO":
-                return "background:rgba(134,239,172,0.10);"
-            if est == "EN CAMINO":
-                return "background:rgba(59,130,246,0.10);"
-            if est == "NO ENTREGADO":
-                return "background:rgba(239,68,68,0.12);"
-            return ""
-
-        def _badge(text, color):
-            return (f'<span style="background:{color}; color:#fff; padding:2px 8px; '
-                    f'border-radius:10px; font-size:11px; font-weight:600;">{text}</span>')
-
-        def _estado_cell(est):
-            cmap = {
-                "ENTREGADO": "#16a34a", "EN CAMINO": "#3b82f6",
-                "PENDIENTE": "#64748b", "NO ENTREGADO": "#ef4444",
-            }
-            return _badge(est or "—", cmap.get(est, "#64748b"))
-
-        def _pago_cell(pago, est):
-            if pago == "PAGADO":
-                return _badge("PAGADO ✓", "#15803d")
-            if est == "ENTREGADO":
-                return _badge("POR COBRAR", "#f59e0b")
-            return '<span style="color:#888; font-size:11px;">—</span>'
-
-        rows_html = []
-        for r in pedidos_ruta:
-            dir_display = r["direccion"] + (f", {r['depto']}" if r.get("depto") else "")
-            monto_str = f"${r['monto']:,.0f}".replace(",", ".")
-            rows_html.append(f"""
-            <tr style="{_row_bg(r)}">
-                <td style="padding:7px 10px; font-family:monospace; color:#cbd5e1;">#{r['numero']}</td>
-                <td style="padding:7px 10px;"><b>{r['cliente'] or '—'}</b></td>
-                <td style="padding:7px 10px; color:#cbd5e1;">{dir_display}</td>
-                <td style="padding:7px 10px; text-align:center;">{r['cantidad'] or '—'}</td>
-                <td style="padding:7px 10px;">{_estado_cell(r['estado'])}</td>
-                <td style="padding:7px 10px;">{_pago_cell(r['estado_pago'], r['estado'])}</td>
-                <td style="padding:7px 10px; font-family:monospace; text-align:right;">{monto_str}</td>
-            </tr>
-            """)
-
-        st.markdown(f"""
-        <div style="max-height:580px; overflow-y:auto; border:1px solid #27272a; border-radius:6px;">
-        <table style="width:100%; border-collapse:collapse; font-size:13px;">
-            <thead style="position:sticky; top:0; background:#0f0f10;">
-                <tr style="text-align:left; color:#9ca3af; border-bottom:1px solid #27272a;">
-                    <th style="padding:10px; font-size:11px; letter-spacing:0.06em; text-transform:uppercase;">#</th>
-                    <th style="padding:10px; font-size:11px; letter-spacing:0.06em; text-transform:uppercase;">Cliente</th>
-                    <th style="padding:10px; font-size:11px; letter-spacing:0.06em; text-transform:uppercase;">Dirección</th>
-                    <th style="padding:10px; font-size:11px; letter-spacing:0.06em; text-transform:uppercase; text-align:center;">Cant</th>
-                    <th style="padding:10px; font-size:11px; letter-spacing:0.06em; text-transform:uppercase;">Estado</th>
-                    <th style="padding:10px; font-size:11px; letter-spacing:0.06em; text-transform:uppercase;">Pago</th>
-                    <th style="padding:10px; font-size:11px; letter-spacing:0.06em; text-transform:uppercase; text-align:right;">Monto</th>
-                </tr>
-            </thead>
-            <tbody>{''.join(rows_html)}</tbody>
-        </table>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # Alerta de pedidos en drivin sin planilla (expander colapsado)
-    solo_drivin = ruta.get("solo_en_drivin", [])
-    if solo_drivin:
-        with st.expander(f"⚠️ {len(solo_drivin)} pedido(s) en driv.in sin reflejo en planilla", expanded=False):
-            import pandas as pd
-            st.dataframe(pd.DataFrame(solo_drivin), use_container_width=True, hide_index=True)
-
-
 with tab_cl:
     clientes = sheets_client.get_clientes()
     if clientes:
@@ -2070,35 +2126,6 @@ with tab_cl:
                         "codigo_drivin": nc_cod, "marca": nc_marca, "precio_especial": nc_prec,
                     })
                     st.success(f"Cliente '{nc_nombre}' agregado!")
-                    st.rerun()
-
-with tab_pg:
-    pagos = sheets_client.get_pagos()
-    if pagos:
-        st.dataframe(pagos, use_container_width=True, hide_index=True, height=300)
-    else:
-        st.info("No hay pagos registrados.")
-
-    with st.expander("➕ Registrar pago"):
-        with st.form("form_pago"):
-            pc1, pc2 = st.columns(2)
-            with pc1:
-                pg_monto = st.number_input("Monto", min_value=0, value=0, step=1000)
-            with pc2:
-                pg_medio = st.selectbox("Medio", ["Efectivo", "Transferencia", "Webpay"])
-            pc3, pc4 = st.columns(2)
-            with pc3:
-                pg_cl = st.text_input("Cliente", key="pg_cl")
-            with pc4:
-                pg_ref = st.text_input("Referencia", placeholder="Nro operacion")
-            pg_ped = st.text_input("Pedido vinculado (#)", key="pg_ped")
-            if st.form_submit_button("Registrar pago", use_container_width=True):
-                if pg_monto > 0:
-                    sheets_client.add_pago({
-                        "monto": pg_monto, "medio": pg_medio, "cliente": pg_cl,
-                        "referencia": pg_ref, "pedido_vinculado": pg_ped, "estado": "PAGADO",
-                    })
-                    st.success("Pago registrado!")
                     st.rerun()
 
 with tab_cr:
