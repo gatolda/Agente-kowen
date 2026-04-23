@@ -211,7 +211,7 @@ class TestSyncClientesFromOperacion(unittest.TestCase):
              "Email": "j@p.cl", "Marca": "KOWEN"},
         ]
         with patch("operations.get_pedidos", return_value=pedidos), \
-             patch("sheets_client.get_clientes", return_value=[]):
+             patch("sheets_client.get_clientes_indexed", return_value=[]):
             r = operations.sync_clientes_from_operacion()
 
         self.assertEqual(r["creados"], 1)
@@ -235,10 +235,10 @@ class TestSyncClientesFromOperacion(unittest.TestCase):
             "Nombre": "Juan Perez", "Codigo Drivin": "CL-001",
             "Direccion": "Calle 123 Vieja", "Telefono": "+56911",
             "Marca": "KOWEN", "Total Pedidos": "0", "Ultimo Pedido": "",
-            "Comuna": "Las Condes", "Depto": "", "Email": "",
+            "Comuna": "Las Condes", "Depto": "", "Email": "", "_row": 2,
         }]
         with patch("operations.get_pedidos", return_value=pedidos), \
-             patch("sheets_client.get_clientes", return_value=existentes):
+             patch("sheets_client.get_clientes_indexed", return_value=existentes):
             r = operations.sync_clientes_from_operacion()
 
         self.assertEqual(r["creados"], 0)
@@ -262,7 +262,7 @@ class TestSyncClientesFromOperacion(unittest.TestCase):
             "Telefono": "", "Email": "", "Marca": "KOWEN",
         }]
         with patch("operations.get_pedidos", return_value=pedidos), \
-             patch("sheets_client.get_clientes", return_value=[]):
+             patch("sheets_client.get_clientes_indexed", return_value=[]):
             r = operations.sync_clientes_from_operacion()
 
         self.assertEqual(r["creados"], 0)

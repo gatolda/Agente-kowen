@@ -1690,7 +1690,7 @@ def sync_clientes_from_operacion():
     Returns:
         Dict con {creados, actualizados, total_clientes}.
     """
-    from sheets_client import get_clientes, add_cliente, update_cliente
+    from sheets_client import get_clientes_indexed, add_cliente, update_cliente
 
     resultado = {"creados": 0, "actualizados": 0, "total_clientes": 0}
 
@@ -1727,9 +1727,10 @@ def sync_clientes_from_operacion():
             g["ultimo_dt"] = fecha_dt
             g["ultimo"] = p
 
-    # Cargar clientes existentes, indexados por codigo y por nombre
+    # Cargar clientes existentes CON indice de fila, para evitar re-lecturas
+    # en cada update (Sheets API limite 60 reads/min).
     try:
-        existentes = get_clientes()
+        existentes = get_clientes_indexed()
     except Exception as e:
         log.warning("Fallo leer CLIENTES: %s", e)
         existentes = []
@@ -1798,7 +1799,9 @@ def sync_clientes_from_operacion():
                     # de update_cliente sin key; saltar silenciosamente.
                     continue
                 try:
-                    update_cliente(nombre_existente, cambios)
+                    # Pasamos _row cacheado de get_clientes_indexed para evitar
+                    # que update_cliente relea la hoja (quota saver).
+                    update_cliente(nombre_existente, cambios, row_idx=existente.get("_row"))
                     resultado["actualizados"] += 1
                 except Exception as e:
                     log.warning("Fallo update_cliente %s: %s", nombre, e)

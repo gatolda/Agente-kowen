@@ -478,8 +478,34 @@ def add_cliente(cliente):
     _append_sheet(TAB_CLIENTES, [row])
 
 
-def update_cliente(nombre, updates):
-    """Actualiza un cliente por nombre exacto."""
+def get_clientes_indexed():
+    """
+    Como get_clientes(), pero cada dict incluye un campo '_row' con el indice
+    1-based del row en la hoja. Util para evitar relectura en updates masivos.
+    """
+    rows = _read_sheet(TAB_CLIENTES)
+    if len(rows) < 2:
+        return []
+    headers = rows[0]
+    out = []
+    for i, row in enumerate(rows[1:], start=2):
+        d = dict(zip(headers, row + [""] * (len(headers) - len(row))))
+        d["_row"] = i
+        out.append(d)
+    return out
+
+
+def update_cliente(nombre, updates, row_idx=None):
+    """
+    Actualiza un cliente.
+
+    Args:
+        nombre: Nombre del cliente (para buscar la fila, si row_idx es None).
+        updates: Dict con campos a actualizar.
+        row_idx: Fila 1-based en la hoja. Si se provee, evita la re-lectura
+            (mucho mas rapido, crucial cuando se actualizan muchos clientes
+            en batch — Sheets API tiene limite 60 reads/min).
+    """
     field_to_col = {
         "nombre": 0, "telefono": 1, "email": 2, "direccion": 3,
         "depto": 4, "comuna": 5, "codigo_drivin": 6, "marca": 7,
@@ -487,30 +513,37 @@ def update_cliente(nombre, updates):
         "estado": 11,
     }
 
-    rows = _read_sheet(TAB_CLIENTES)
-    target_row = None
-    for i, row in enumerate(rows):
-        if i == 0:
-            continue
-        if row and row[0].lower() == nombre.lower():
-            target_row = i + 1
-            break
+    target_row = row_idx
+    if target_row is None:
+        rows = _read_sheet(TAB_CLIENTES)
+        for i, row in enumerate(rows):
+            if i == 0:
+                continue
+            if row and row[0].lower() == nombre.lower():
+                target_row = i + 1
+                break
+        if not target_row:
+            raise ValueError(f"Cliente '{nombre}' no encontrado")
 
-    if not target_row:
-        raise ValueError(f"Cliente '{nombre}' no encontrado")
-
-    service = _get_service()
+    # Batch: 1 llamada con todos los campos en vez de N llamadas
+    data = []
     for field, value in updates.items():
         col_idx = field_to_col.get(field)
         if col_idx is None:
             continue
-        cell = f"'{TAB_CLIENTES}'!{chr(65 + col_idx)}{target_row}"
-        service.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID,
-            range=cell,
-            valueInputOption="USER_ENTERED",
-            body={"values": [[str(value)]]},
-        ).execute()
+        data.append({
+            "range": f"'{TAB_CLIENTES}'!{chr(65 + col_idx)}{target_row}",
+            "values": [[str(value)]],
+        })
+
+    if not data:
+        return
+
+    service = _get_service()
+    service.spreadsheets().values().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"valueInputOption": "USER_ENTERED", "data": data},
+    ).execute()
 
 
 # ===== PAGOS =====
