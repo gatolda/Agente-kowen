@@ -12,6 +12,17 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 load_dotenv()
 
+# Bridge Streamlit Cloud secrets -> os.environ
+# (en Cloud las variables estan en st.secrets, no en env vars; el resto del
+# codigo —config.py, sheets_client, drivin_client— lee de os.getenv, asi que
+# hacemos el puente ANTES de importar esos modulos)
+try:
+    for _k, _v in st.secrets.items():
+        if _k not in os.environ:
+            os.environ[_k] = str(_v)
+except Exception:
+    pass  # no secrets configurados (modo local) — seguir con .env/dotenv
+
 # Limpiar cache corrupto de Streamlit (previene error "null bytes")
 _cache_dir = os.path.join(os.path.dirname(__file__), ".streamlit", "cache")
 if os.path.exists(_cache_dir):
