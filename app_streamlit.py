@@ -16,12 +16,27 @@ load_dotenv()
 # (en Cloud las variables estan en st.secrets, no en env vars; el resto del
 # codigo —config.py, sheets_client, drivin_client— lee de os.getenv, asi que
 # hacemos el puente ANTES de importar esos modulos)
+_secrets_loaded = []
+_secrets_error = None
 try:
     for _k, _v in st.secrets.items():
         if _k not in os.environ:
             os.environ[_k] = str(_v)
-except Exception:
-    pass  # no secrets configurados (modo local) — seguir con .env/dotenv
+        _secrets_loaded.append(_k)
+except Exception as _e:
+    _secrets_error = str(_e)
+
+# Mostrar estado temprano si faltan secrets criticos (debug de deploy)
+_required = ["GOOGLE_SA_JSON", "DRIVIN_API_KEY", "GOOGLE_SHEETS_KOWEN_ID"]
+_missing = [k for k in _required if not os.environ.get(k)]
+if _missing:
+    st.error(
+        f"**Faltan secrets criticos:** {', '.join(_missing)}\n\n"
+        f"Secrets cargados: {_secrets_loaded or '(ninguno)'}\n\n"
+        f"Error al leer st.secrets: {_secrets_error or 'ninguno'}\n\n"
+        "Configurar en Streamlit Cloud: Settings -> Secrets."
+    )
+    st.stop()
 
 # Limpiar cache corrupto de Streamlit (previene error "null bytes")
 _cache_dir = os.path.join(os.path.dirname(__file__), ".streamlit", "cache")
