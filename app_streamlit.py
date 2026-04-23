@@ -885,22 +885,23 @@ with tab_op:
             st.info("No hay pedidos para esta fecha.")
         else:
             def _row_style(r):
-                """Devuelve style CSS completo para <tr>: fondo + borde izq si accionable."""
+                """Devuelve style CSS completo para <tr>: fondo + borde izq si accionable.
+                Colores solidos pastel que se ven bien tanto en light como dark theme."""
                 est = r["estado"]; pago = r["estado_pago"]
                 if est == "ENTREGADO" and pago == "PAGADO":
-                    # Verde — completo (objetivo cumplido)
-                    return "background:rgba(22,163,74,0.20); border-left:3px solid transparent;"
+                    # Verde pastel — completo (objetivo cumplido)
+                    return "background:#d1fae5; border-left:3px solid #16a34a;"
                 if est == "ENTREGADO":
-                    # Amarillo — entregado sin pagar (accionable: cobrar)
-                    return "background:rgba(234,179,8,0.18); border-left:3px solid #eab308;"
+                    # Amarillo pastel — entregado sin pagar (accionable: cobrar)
+                    return "background:#fef3c7; border-left:3px solid #eab308;"
                 if est == "NO ENTREGADO":
-                    # Rojo — no entregado (accionable: reintentar)
-                    return "background:rgba(239,68,68,0.16); border-left:3px solid #ef4444;"
+                    # Rojo pastel — no entregado (accionable: reintentar)
+                    return "background:#fee2e2; border-left:3px solid #ef4444;"
                 if est == "EN CAMINO":
-                    # Azul claro — en proceso
-                    return "background:rgba(59,130,246,0.10); border-left:3px solid transparent;"
-                # Pendiente — sin color
-                return "border-left:3px solid transparent;"
+                    # Azul pastel — en proceso
+                    return "background:#dbeafe; border-left:3px solid #3b82f6;"
+                # Pendiente — gris muy claro para distinguir del fondo
+                return "background:#f9fafb; border-left:3px solid #e5e7eb;"
 
             def _completo_icon(r):
                 """Icono ✓ grande al final de las filas completas."""
@@ -930,18 +931,18 @@ with tab_op:
             for r in pedidos_ruta:
                 dir_display = r["direccion"] + (f", {r['depto']}" if r.get("depto") else "")
                 monto_str = f"${r['monto']:,.0f}".replace(",", ".")
-                # Sin indentacion inicial: Streamlit interpreta 4+ espacios como code block
+                # Colores de texto neutros (legibles en light y dark theme)
                 rows_html.append(
                     f'<tr style="{_row_style(r)}">'
-                    f'<td style="padding:7px 10px; font-family:monospace; color:#cbd5e1;">#{r["numero"]}</td>'
-                    f'<td style="padding:7px 10px;"><b>{r["cliente"] or "—"}</b></td>'
-                    f'<td style="padding:7px 10px; color:#cbd5e1;">{dir_display}</td>'
-                    f'<td style="padding:7px 10px; color:#cbd5e1;">{r["comuna"] or "—"}</td>'
-                    f'<td style="padding:7px 10px; text-align:center;">{r["cantidad"] or "—"}</td>'
-                    f'<td style="padding:7px 10px; color:#cbd5e1;">{r["repartidor"] or "—"}</td>'
+                    f'<td style="padding:7px 10px; font-family:monospace; color:#6b7280;">#{r["numero"]}</td>'
+                    f'<td style="padding:7px 10px; color:#111827;"><b>{r["cliente"] or "—"}</b></td>'
+                    f'<td style="padding:7px 10px; color:#374151;">{dir_display}</td>'
+                    f'<td style="padding:7px 10px; color:#374151;">{r["comuna"] or "—"}</td>'
+                    f'<td style="padding:7px 10px; text-align:center; color:#111827; font-weight:600;">{r["cantidad"] or "—"}</td>'
+                    f'<td style="padding:7px 10px; color:#374151;">{r["repartidor"] or "—"}</td>'
                     f'<td style="padding:7px 10px;">{_estado_cell(r["estado"])}</td>'
                     f'<td style="padding:7px 10px;">{_pago_cell(r["estado_pago"], r["estado"])}</td>'
-                    f'<td style="padding:7px 10px; font-family:monospace; text-align:right;">{monto_str}</td>'
+                    f'<td style="padding:7px 10px; font-family:monospace; text-align:right; color:#111827; font-weight:600;">{monto_str}</td>'
                     f'<td style="padding:7px 10px; text-align:center; width:28px;">{_completo_icon(r)}</td>'
                     f'</tr>'
                 )
@@ -960,10 +961,10 @@ with tab_op:
                 '<th style="padding:10px; font-size:11px; text-transform:uppercase; text-align:center;">✓</th>'
             )
             table_html = (
-                '<div style="max-height:640px; overflow-y:auto; border:1px solid #27272a; border-radius:6px;">'
+                '<div style="max-height:640px; overflow-y:auto; border:1px solid #e5e7eb; border-radius:6px;">'
                 '<table style="width:100%; border-collapse:collapse; font-size:13px;">'
-                '<thead style="position:sticky; top:0; background:#0f0f10;">'
-                f'<tr style="text-align:left; color:#9ca3af; border-bottom:1px solid #27272a;">{head_cols}</tr>'
+                '<thead style="position:sticky; top:0; background:#f3f4f6;">'
+                f'<tr style="text-align:left; color:#374151; border-bottom:1px solid #d1d5db;">{head_cols}</tr>'
                 '</thead>'
                 f'<tbody>{"".join(rows_html)}</tbody>'
                 '</table>'
