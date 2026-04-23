@@ -314,6 +314,12 @@ def get_ruta_del_dia(fecha_str):
     bot_total = sum(_cant_of(r) for r in out)
     bot_entregados = sum(_cant_of(r) for r in out if r["estado"] == "ENTREGADO")
     bot_cobrados = sum(_cant_of(r) for r in out if r["estado_pago"] == "PAGADO")
+    # Por cobrar = botellones ya entregados que aun no estan pagados.
+    # (No usar entregados - cobrados: puede ser negativo si hay pagos adelantados)
+    bot_por_cobrar_real = sum(
+        _cant_of(r) for r in out
+        if r["estado"] == "ENTREGADO" and r["estado_pago"] != "PAGADO"
+    )
 
     # Stats
     stats = {
@@ -334,7 +340,7 @@ def get_ruta_del_dia(fecha_str):
         "botellones_total": bot_total,
         "botellones_entregados": bot_entregados,
         "botellones_cobrados": bot_cobrados,
-        "botellones_por_cobrar": bot_entregados - bot_cobrados,
+        "botellones_por_cobrar": bot_por_cobrar_real,
     }
     stats["pct_entregados"] = (
         round(stats["entregados"] / stats["total"] * 100) if stats["total"] else 0

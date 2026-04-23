@@ -918,40 +918,44 @@ with tab_op:
             for r in pedidos_ruta:
                 dir_display = r["direccion"] + (f", {r['depto']}" if r.get("depto") else "")
                 monto_str = f"${r['monto']:,.0f}".replace(",", ".")
-                rows_html.append(f"""
-                <tr style="{_row_bg(r)}">
-                    <td style="padding:7px 10px; font-family:monospace; color:#cbd5e1;">#{r['numero']}</td>
-                    <td style="padding:7px 10px;"><b>{r['cliente'] or '—'}</b></td>
-                    <td style="padding:7px 10px; color:#cbd5e1;">{dir_display}</td>
-                    <td style="padding:7px 10px; color:#cbd5e1;">{r['comuna'] or '—'}</td>
-                    <td style="padding:7px 10px; text-align:center;">{r['cantidad'] or '—'}</td>
-                    <td style="padding:7px 10px; color:#cbd5e1;">{r['repartidor'] or '—'}</td>
-                    <td style="padding:7px 10px;">{_estado_cell(r['estado'])}</td>
-                    <td style="padding:7px 10px;">{_pago_cell(r['estado_pago'], r['estado'])}</td>
-                    <td style="padding:7px 10px; font-family:monospace; text-align:right;">{monto_str}</td>
-                </tr>
-                """)
+                # Sin indentacion inicial: Streamlit interpreta 4+ espacios como code block
+                rows_html.append(
+                    f'<tr style="{_row_bg(r)}">'
+                    f'<td style="padding:7px 10px; font-family:monospace; color:#cbd5e1;">#{r["numero"]}</td>'
+                    f'<td style="padding:7px 10px;"><b>{r["cliente"] or "—"}</b></td>'
+                    f'<td style="padding:7px 10px; color:#cbd5e1;">{dir_display}</td>'
+                    f'<td style="padding:7px 10px; color:#cbd5e1;">{r["comuna"] or "—"}</td>'
+                    f'<td style="padding:7px 10px; text-align:center;">{r["cantidad"] or "—"}</td>'
+                    f'<td style="padding:7px 10px; color:#cbd5e1;">{r["repartidor"] or "—"}</td>'
+                    f'<td style="padding:7px 10px;">{_estado_cell(r["estado"])}</td>'
+                    f'<td style="padding:7px 10px;">{_pago_cell(r["estado_pago"], r["estado"])}</td>'
+                    f'<td style="padding:7px 10px; font-family:monospace; text-align:right;">{monto_str}</td>'
+                    f'</tr>'
+                )
 
-            st.markdown(f"""
-            <div style="max-height:640px; overflow-y:auto; border:1px solid #27272a; border-radius:6px;">
-            <table style="width:100%; border-collapse:collapse; font-size:13px;">
-                <thead style="position:sticky; top:0; background:#0f0f10;">
-                    <tr style="text-align:left; color:#9ca3af; border-bottom:1px solid #27272a;">
-                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">#</th>
-                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">Cliente</th>
-                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">Dirección</th>
-                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">Comuna</th>
-                        <th style="padding:10px; font-size:11px; text-transform:uppercase; text-align:center;">Cant</th>
-                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">Repartidor</th>
-                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">Estado</th>
-                        <th style="padding:10px; font-size:11px; text-transform:uppercase;">Pago</th>
-                        <th style="padding:10px; font-size:11px; text-transform:uppercase; text-align:right;">Monto</th>
-                    </tr>
-                </thead>
-                <tbody>{''.join(rows_html)}</tbody>
-            </table>
-            </div>
-            """, unsafe_allow_html=True)
+            # HTML en UNA sola linea (sin indentacion) para que Streamlit lo renderice
+            head_cols = (
+                '<th style="padding:10px; font-size:11px; text-transform:uppercase;">#</th>'
+                '<th style="padding:10px; font-size:11px; text-transform:uppercase;">Cliente</th>'
+                '<th style="padding:10px; font-size:11px; text-transform:uppercase;">Dirección</th>'
+                '<th style="padding:10px; font-size:11px; text-transform:uppercase;">Comuna</th>'
+                '<th style="padding:10px; font-size:11px; text-transform:uppercase; text-align:center;">Cant</th>'
+                '<th style="padding:10px; font-size:11px; text-transform:uppercase;">Repartidor</th>'
+                '<th style="padding:10px; font-size:11px; text-transform:uppercase;">Estado</th>'
+                '<th style="padding:10px; font-size:11px; text-transform:uppercase;">Pago</th>'
+                '<th style="padding:10px; font-size:11px; text-transform:uppercase; text-align:right;">Monto</th>'
+            )
+            table_html = (
+                '<div style="max-height:640px; overflow-y:auto; border:1px solid #27272a; border-radius:6px;">'
+                '<table style="width:100%; border-collapse:collapse; font-size:13px;">'
+                '<thead style="position:sticky; top:0; background:#0f0f10;">'
+                f'<tr style="text-align:left; color:#9ca3af; border-bottom:1px solid #27272a;">{head_cols}</tr>'
+                '</thead>'
+                f'<tbody>{"".join(rows_html)}</tbody>'
+                '</table>'
+                '</div>'
+            )
+            st.markdown(table_html, unsafe_allow_html=True)
 
     # ------------ SUB-TAB PLAN DRIV.IN ------------
     with sub_plan:
