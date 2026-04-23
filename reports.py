@@ -305,6 +305,16 @@ def get_ruta_del_dia(fecha_str):
         return (0, r["numero"])
     out.sort(key=_orden_key)
 
+    def _cant_of(r):
+        try:
+            return int(str(r.get("cantidad", 0) or 0).strip() or 0)
+        except (ValueError, TypeError):
+            return 0
+
+    bot_total = sum(_cant_of(r) for r in out)
+    bot_entregados = sum(_cant_of(r) for r in out if r["estado"] == "ENTREGADO")
+    bot_cobrados = sum(_cant_of(r) for r in out if r["estado_pago"] == "PAGADO")
+
     # Stats
     stats = {
         "total": len(out),
@@ -321,12 +331,22 @@ def get_ruta_del_dia(fecha_str):
             1 for r in out
             if r["estado"] == "ENTREGADO" and r["estado_pago"] == "PAGADO"
         ),
+        "botellones_total": bot_total,
+        "botellones_entregados": bot_entregados,
+        "botellones_cobrados": bot_cobrados,
+        "botellones_por_cobrar": bot_entregados - bot_cobrados,
     }
     stats["pct_entregados"] = (
         round(stats["entregados"] / stats["total"] * 100) if stats["total"] else 0
     )
     stats["pct_completos"] = (
         round(stats["completos"] / stats["total"] * 100) if stats["total"] else 0
+    )
+    stats["pct_bot_entregados"] = (
+        round(bot_entregados / bot_total * 100) if bot_total else 0
+    )
+    stats["pct_bot_cobrados"] = (
+        round(bot_cobrados / bot_total * 100) if bot_total else 0
     )
 
     return {
