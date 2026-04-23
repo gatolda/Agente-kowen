@@ -8,12 +8,10 @@ Configuracion:
 3. Ejecutar: python bot_telegram.py
 """
 
-import os
 import logging
 from datetime import datetime
 
-from dotenv import load_dotenv
-load_dotenv()
+from config import TELEGRAM_BOT_TOKEN
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -344,42 +342,33 @@ async def correos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("Leyendo correos no leidos...")
 
     try:
-        r = payments.procesar_emails_no_leidos(max_emails=30, marcar_leidos=False)
+        r = payments.procesar_emails_no_leidos(max_emails=30)
 
         if r["total"] == 0:
             await msg.edit_text("No hay correos no leidos.")
             return
 
         cats = r.get("por_categoria", {})
-        conciliados = r.get("pagos_conciliados", [])
-        sugeridos = r.get("pagos_sugeridos", [])
-        sin_match = r.get("pagos_sin_match", [])
+        por_confirmar = r.get("pagos_por_confirmar", [])
         alertas = r.get("alertas", [])
+        dup = r.get("duplicados", 0)
 
-        text = f"*Correos procesados: {r['total']}*\n"
+        text = f"*Correos procesados: {r['total']}*"
+        if dup:
+            text += f" ({dup} ya procesados)"
+        text += "\n"
         if cats:
             text += "\n" + ", ".join(f"{k}:{v}" for k, v in cats.items()) + "\n"
 
-        if conciliados:
-            text += f"\n*Pagos conciliados auto ({len(conciliados)}):*\n"
-            for p in conciliados[:8]:
-                text += (f"  #{p['pedido']} {p['cliente'][:20]} "
-                         f"${p['monto']} (score {p['score']})\n")
-
-        if sugeridos:
-            text += f"\n*Pagos para revisar ({len(sugeridos)}):*\n"
-            for p in sugeridos[:5]:
+        if por_confirmar:
+            text += f"\n*Pagos por confirmar ({len(por_confirmar)}):*\n"
+            for p in por_confirmar[:8]:
                 pago = p["pago"]
+                top = p["candidatos"][0] if p["candidatos"] else None
+                suf = f" -> #{top['numero']} ({top['score']}%)" if top else " (sin candidatos)"
                 text += (f"  {pago.get('remitente_nombre', '')[:20]} "
-                         f"${pago.get('monto', '')} -> "
-                         f"{len(p['candidatos'])} candidatos\n")
-
-        if sin_match:
-            text += f"\n*Pagos sin match ({len(sin_match)}):*\n"
-            for p in sin_match[:5]:
-                pago = p["pago"]
-                text += (f"  {pago.get('remitente_nombre', '')[:20]} "
-                         f"${pago.get('monto', '')}\n")
+                         f"${pago.get('monto', '')}{suf}\n")
+            text += "\n_Confirmar en el dashboard._\n"
 
         if alertas:
             text += f"\n*Alertas ({len(alertas)}):*\n"
@@ -557,26 +546,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import payments
         msg = await query.edit_message_text("Leyendo correos no leidos...")
         try:
-            r = payments.procesar_emails_no_leidos(max_emails=30, marcar_leidos=False)
+            r = payments.procesar_emails_no_leidos(max_emails=30)
             if r["total"] == 0:
                 await msg.edit_text("No hay correos no leidos.")
                 return
             cats = r.get("por_categoria", {})
-            conciliados = r.get("pagos_conciliados", [])
-            sugeridos = r.get("pagos_sugeridos", [])
-            sin_match = r.get("pagos_sin_match", [])
+            por_confirmar = r.get("pagos_por_confirmar", [])
             alertas = r.get("alertas", [])
-            text = f"*Correos: {r['total']}*\n"
+            dup = r.get("duplicados", 0)
+            text = f"*Correos: {r['total']}*"
+            if dup:
+                text += f" ({dup} ya procesados)"
+            text += "\n"
             if cats:
                 text += ", ".join(f"{k}:{v}" for k, v in cats.items()) + "\n"
-            if conciliados:
-                text += f"\nConciliados auto: {len(conciliados)}\n"
-                for p in conciliados[:5]:
-                    text += f"  #{p['pedido']} {p['cliente'][:20]} ${p['monto']}\n"
-            if sugeridos:
-                text += f"\nPara revisar: {len(sugeridos)}\n"
-            if sin_match:
-                text += f"\nSin match: {len(sin_match)}\n"
+            if por_confirmar:
+                text += f"\nPagos por confirmar: {len(por_confirmar)}\n"
+                for p in por_confirmar[:5]:
+                    pago = p["pago"]
+                    top = p["candidatos"][0] if p["candidatos"] else None
+                    suf = f" -> #{top['numero']} ({top['score']}%)" if top else ""
+                    text += f"  {pago.get('remitente_nombre', '')[:20]} ${pago.get('monto', '')}{suf}\n"
+                text += "_Confirmar en el dashboard._\n"
             if alertas:
                 text += f"\nAlertas: {len(alertas)}\n"
                 for a in alertas[:3]:
@@ -609,14 +600,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Main ---
 
 def main():
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
+    if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN no configurado en .env")
         print("1. Crea un bot con @BotFather en Telegram")
         print("2. Agrega TELEGRAM_BOT_TOKEN=tu_token al archivo .env")
         return
 
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Comandos
     app.add_handler(CommandHandler("start", start))

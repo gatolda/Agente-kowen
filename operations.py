@@ -3,22 +3,64 @@ Operaciones de negocio del Agente Kowen.
 Sincronizacion, importacion, rutina diaria y resumen.
 """
 
+import logging
 import os
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from unidecode import unidecode
 
+import config
+from config import PLANILLA_REPARTO_ID, PLANILLA_CACTUS_ID
+
+log = logging.getLogger("kowen.operations")
+
+# Lock de sincronizacion: scheduler (15 min), rutina diaria (08:00), CLI y
+# botones del dashboard pueden disparar la misma importacion concurrentemente.
+# Un lock de archivo evita duplicados y race conditions entre procesos distintos.
+_LOCK_DIR = os.path.join(os.path.dirname(__file__), "logs")
+_LOCK_STALE_SECONDS = 300  # 5 min: si el lock es mas viejo, se considera muerto
+
+
+@contextmanager
+def _sync_lock(name):
+    """
+    Lock de archivo para evitar ejecuciones concurrentes de la misma operacion
+    entre procesos (scheduler, CLI, Streamlit, rutina diaria).
+
+    Si el lock esta tomado y fresco, yielda False (el caller debe saltarse).
+    Si esta libre o stale, lo toma y yielda True.
+    """
+    os.makedirs(_LOCK_DIR, exist_ok=True)
+    path = os.path.join(_LOCK_DIR, f"{name}.lock")
+    acquired = False
+    try:
+        if os.path.exists(path):
+            age = time.time() - os.path.getmtime(path)
+            if age < _LOCK_STALE_SECONDS:
+                log.info("Lock %s tomado hace %.0fs, saltando.", name, age)
+                yield False
+                return
+            log.warning("Lock %s stale (%.0fs), tomando control.", name, age)
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"{os.getpid()} {datetime.now().isoformat()}")
+        acquired = True
+        yield True
+    finally:
+        if acquired:
+            try:
+                os.remove(path)
+            except OSError as e:
+                log.warning("No se pudo borrar lock %s: %s", path, e)
 from sheets_client import (
     get_pedidos, add_pedidos, update_pedido, update_pedidos_batch,
     delete_pedido, get_clientes, _get_service, _read_sheet, _write_sheet,
     _append_sheet, _retry, _normalize_address, _pedido_to_row,
     OP_COLS, TAB_OPERACION, SPREADSHEET_ID,
-)
-
-PLANILLA_REPARTO_ID = os.getenv(
-    "PLANILLA_REPARTO_ID", "1jNTWO2hkkRBlEamXrQ6BGy28tlAj7ei1Qyyt559mvds",
-)
-PLANILLA_CACTUS_ID = os.getenv(
-    "PLANILLA_CACTUS_ID", "1w5Klrcbq7-B6HUBCADeIkmv5_r4vhGnsYv7EuJQqxgU",
 )
 
 # Mapeo de status de driv.in (PODs / orders) a estados del sistema.
@@ -30,6 +72,41 @@ DRIVIN_STATUS_MAP = {
     "pending": "EN CAMINO",
     "in-transit": "EN CAMINO",
 }
+
+
+def _parse_cash_from_comment(comment):
+    """
+    Extrae monto de efectivo de un comentario de POD.
+    Ejemplos soportados: "pago $5000", "efectivo 10.000", "$2990",
+    "pagaron 5990 en efectivo", "5.980 cash".
+
+    Retorna int con el monto o None si no encuentra.
+    """
+    if not comment:
+        return None
+    import re
+    text = unidecode(comment).lower()
+    # Ignorar si menciona transferencia/webpay/deposito — no es efectivo
+    for neg in ("transfer", "webpay", "deposito", "tarjeta", "cheque"):
+        if neg in text:
+            return None
+    # Extraer numeros con posibles separadores de miles
+    # Acepta: 5000, 5.000, 5,000, $5000, $5.000
+    matches = re.findall(r"\$?\s*(\d{1,3}(?:[.,]\d{3})+|\d{3,6})", text)
+    if not matches:
+        return None
+    # Tomar el mayor valor (asumimos es el total del pago)
+    valores = []
+    for m in matches:
+        limpio = m.replace(".", "").replace(",", "")
+        if limpio.isdigit():
+            v = int(limpio)
+            # Filtrar rangos razonables: 1000 a 500000 CLP
+            if 1000 <= v <= 500000:
+                valores.append(v)
+    if not valores:
+        return None
+    return max(valores)
 
 
 # ===== SINCRONIZACION =====
@@ -117,7 +194,7 @@ def check_bsale_orders(orders):
             except (ValueError, IndexError):
                 pass
 
-    hoy = datetime.now()
+    hoy = config.now().replace(tzinfo=None)
 
     result = []
     for order in orders:
@@ -229,8 +306,8 @@ def crear_direccion_drivin(pedido_num, codigo_sugerido=None):
                 comuna,
                 "", "",  # lat, lng (se llenaran en proximo refresh)
             ])
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("Fallo cache CSV al agregar %s: %s", codigo_sugerido, e)
 
     # Asignar codigo al pedido
     update_pedido(int(pedido_num), {"codigo_drivin": codigo_sugerido})
@@ -267,7 +344,7 @@ def check_bsale_pendientes(fecha=None):
     import bsale_client
 
     if not fecha:
-        fecha = datetime.now().strftime("%d/%m/%Y")
+        fecha = config.now().strftime("%d/%m/%Y")
 
     parts = fecha.split("/")
     hoy_dt = datetime(int(parts[2]), int(parts[1]), int(parts[0]))
@@ -401,7 +478,7 @@ def sync_from_bsale(orders, fecha_destino=None):
                 parts = fecha_bsale.split("-")
                 fecha = f"{parts[2]}/{parts[1]}/{parts[0]}"
             else:
-                fecha = datetime.now().strftime("%d/%m/%Y")
+                fecha = config.now().strftime("%d/%m/%Y")
 
         nuevos.append({
             "fecha": fecha,
@@ -425,136 +502,30 @@ def sync_from_bsale(orders, fecha_destino=None):
     return len(nuevos)
 
 
-def import_from_drivin(scenario_token, fecha=None):
-    """
-    Importa pedidos desde un escenario de driv.in a OPERACION DIARIA.
-    Util cuando la ruta ya esta hecha en driv.in y queremos poblar la planilla.
-
-    Args:
-        scenario_token: Token del escenario.
-        fecha: Fecha para los pedidos (DD/MM/YYYY). None = hoy.
-
-    Returns:
-        Cantidad de pedidos importados.
-    """
-    import drivin_client
-
-    if not fecha:
-        fecha = datetime.now().strftime("%d/%m/%Y")
-
-    orders_data = drivin_client.get_orders(scenario_token)
-    response = orders_data.get("response", [])
-
-    if not response:
-        return 0
-
-    # Mapear vehiculos a conductores
-    driver_map = {}
-    try:
-        results = drivin_client.get_results(scenario_token)
-        for route in results.get("response", []):
-            driver_info = route.get("driver_name", route.get("driver", {}))
-            if isinstance(driver_info, dict):
-                driver_name = driver_info.get("full_name", "")
-            else:
-                driver_name = str(driver_info)
-            vehicle = route.get("vehicle_code", "")
-            if vehicle and driver_name:
-                driver_map[vehicle] = driver_name
-    except Exception:
-        pass
-
-    # Evitar duplicados
-    existing = get_pedidos(fecha)
-    existing_codes = {p.get("Codigo Drivin", "") for p in existing if p.get("Codigo Drivin")}
-
-    nuevos = []
-    for client in response:
-        code = client.get("code", "")
-        address = client.get("address_1", "")
-        address2 = client.get("address_2", "").strip()
-        comuna = client.get("area_level_3", "")
-
-        for order in client.get("orders", []):
-            order_code = order.get("code", "")
-            units = int(order.get("units_1", 0))
-            description = order.get("description", "Kowen")
-            vehicle_code = order.get("vehicle_code", "")
-            trip_number = order.get("trip_number", 1)
-            name = order.get("name", "")
-
-            if code in existing_codes:
-                continue
-
-            # Marca
-            marca = "KOWEN"
-            if "cactus" in description.lower():
-                marca = "CACTUS"
-
-            # Aliado
-            aliado = ""
-            for al in ("Bernardino", "Puragua Ivan", "Pulmahue"):
-                if al.lower() in description.lower():
-                    aliado = al
-                    break
-
-            # Repartidor desde vehiculo
-            repartidor = driver_map.get(vehicle_code, "")
-
-            # Vuelta
-            vuelta = ""
-            if trip_number == 2:
-                vuelta = "2a"
-            elif trip_number == 3:
-                vuelta = "3a"
-            elif trip_number == 1:
-                vuelta = "1a"
-
-            # Depto desde address2 o name
-            depto = address2 if address2 and address2 != " " else ""
-            if not depto and name and name != address:
-                extra = name.replace(address, "").strip()
-                if extra:
-                    depto = extra
-
-            nuevos.append({
-                "fecha": fecha,
-                "direccion": address,
-                "depto": depto,
-                "comuna": comuna,
-                "codigo_drivin": code,
-                "cant": units,
-                "marca": marca,
-                "repartidor": repartidor,
-                "vuelta": vuelta,
-                "estado_pedido": "PENDIENTE",
-                "estado_pago": "PENDIENTE",
-                "aliado": aliado,
-                "canal": "MANUAL",
-                "plan_drivin": "",
-            })
-
-            existing_codes.add(code)
-
-    if nuevos:
-        add_pedidos(nuevos)
-
-    return len(nuevos)
-
-
 def sync_from_planilla_reparto(fecha=None):
     """
     Importa pedidos desde la planilla reparto (PRIMER TURNO) a OPERACION DIARIA.
     Evita duplicados comparando direccion + depto + cantidad.
 
+    Protegido por _sync_lock — si otro proceso esta importando, retorna 0 sin
+    reintentar (el scheduler volvera a intentar en el proximo ciclo).
+
     Args:
         fecha: Fecha a importar (DD/MM/YYYY). None = hoy.
 
     Returns:
-        Cantidad de pedidos importados.
+        Cantidad de pedidos importados (0 si lock tomado o no hay nuevos).
     """
+    with _sync_lock("sync_planilla_reparto") as acquired:
+        if not acquired:
+            return 0
+        return _sync_from_planilla_reparto_impl(fecha)
+
+
+def _sync_from_planilla_reparto_impl(fecha=None):
+    """Implementacion real de sync_from_planilla_reparto (llamar solo con lock)."""
     if not fecha:
-        fecha = datetime.now().strftime("%d/%m/%Y")
+        fecha = config.now().strftime("%d/%m/%Y")
 
     service = _get_service()
 
@@ -740,14 +711,24 @@ def sync_from_planilla_cactus(fecha=None):
     La planilla Cactus tiene un header con la fecha y pedidos debajo sin fecha.
     Estructura: B=Direccion, C=Comuna, D=Nombre, E=Repartidor, F=Estado, G=Cant, H=Comentario
 
+    Protegido por _sync_lock — si otro proceso esta importando, retorna 0.
+
     Args:
         fecha: Fecha a importar (DD/MM/YYYY). None = hoy.
 
     Returns:
-        Cantidad de pedidos importados.
+        Cantidad de pedidos importados (0 si lock tomado o no hay nuevos).
     """
+    with _sync_lock("sync_planilla_cactus") as acquired:
+        if not acquired:
+            return 0
+        return _sync_from_planilla_cactus_impl(fecha)
+
+
+def _sync_from_planilla_cactus_impl(fecha=None):
+    """Implementacion real de sync_from_planilla_cactus (llamar solo con lock)."""
     if not fecha:
-        fecha = datetime.now().strftime("%d/%m/%Y")
+        fecha = config.now().strftime("%d/%m/%Y")
 
     service = _get_service()
 
@@ -756,7 +737,8 @@ def sync_from_planilla_cactus(fecha=None):
             spreadsheetId=PLANILLA_CACTUS_ID,
             range="'Enero 2023'!A:M",
         ).execute()
-    except Exception:
+    except Exception as e:
+        log.warning("Fallo leer planilla Cactus: %s", e)
         return 0
 
     rows = result.get("values", [])
@@ -931,7 +913,7 @@ def sync_from_drivin(fecha=None, plan_name=""):
     import drivin_client
 
     if not fecha:
-        fecha = datetime.now().strftime("%d/%m/%Y")
+        fecha = config.now().strftime("%d/%m/%Y")
 
     # Convertir fecha a YYYY-MM-DD para la API
     parts = fecha.split("/")
@@ -1045,7 +1027,7 @@ def sync_to_planilla_reparto(fecha=None):
         Cantidad de filas actualizadas/agregadas.
     """
     if not fecha:
-        fecha = datetime.now().strftime("%d/%m/%Y")
+        fecha = config.now().strftime("%d/%m/%Y")
 
     # Leer pedidos de nuestro sistema
     pedidos = get_pedidos(fecha)
@@ -1184,7 +1166,7 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
     import drivin_client
 
     if not fecha:
-        fecha = datetime.now().strftime("%d/%m/%Y")
+        fecha = config.now().strftime("%d/%m/%Y")
 
     parts = fecha.split("/")
     hoy_dt = datetime(int(parts[2]), int(parts[1]), int(parts[0]))
@@ -1267,8 +1249,8 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
                                     route_info["started"] = True
                                 if r.get("is_finished"):
                                     route_info["finished"] = True
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            log.warning("No se pudo obtener routes del plan %s: %s", plan_name, e)
 
                     plan_status[plan_name] = {
                         "token": token,
@@ -1284,8 +1266,8 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
                             "token": token,
                         })
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("No se pudo verificar status del plan %s: %s", plan_name, e)
 
     # --- Obtener PODs del rango (en tramos <=5 dias, la API da 403 con rangos mas largos) ---
     all_pods = []
@@ -1299,8 +1281,11 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
                 tramo_fin.strftime("%Y-%m-%d"),
             )
             all_pods.extend(tramo_data.get("response", []))
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(
+                "Fallo get_pods tramo %s..%s: %s",
+                tramo_inicio.strftime("%Y-%m-%d"), tramo_fin.strftime("%Y-%m-%d"), e,
+            )
         tramo_inicio = tramo_fin + timedelta(days=1)
 
     # Indexar PODs por address_code y por direccion normalizada
@@ -1400,6 +1385,34 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
             if comment:
                 upd["com_chofer"] = comment
 
+            # Detectar pago en efectivo desde comentario POD
+            if (nuevo_estado == "ENTREGADO"
+                    and comment
+                    and p.get("Estado Pago", "").upper() != "PAGADO"):
+                monto_efectivo = _parse_cash_from_comment(comment)
+                if monto_efectivo:
+                    upd["efectivo"] = str(monto_efectivo)
+                    upd["estado_pago"] = "PAGADO"
+                    upd["forma_pago"] = "Efectivo"
+                    upd["fecha_pago"] = fecha_pedido or fecha
+                    resultado.setdefault("efectivo_detectado", 0)
+                    resultado["efectivo_detectado"] += 1
+                    # Registrar en PAGOS para mantener el libro centralizado
+                    try:
+                        from sheets_client import add_pago
+                        add_pago({
+                            "fecha": fecha_pedido or fecha,
+                            "monto": monto_efectivo,
+                            "medio": "Efectivo",
+                            "referencia": f"POD drivin {codigo or dir_norm}",
+                            "pedido_vinculado": nro,
+                            "cliente": p.get("Cliente", ""),
+                            "estado": "CONCILIADO_POD",
+                            "email_id": f"drivin-pod-{nro}-{fecha_pedido or fecha}",
+                        })
+                    except Exception as e:
+                        log.warning("Fallo registrar pago POD para #%s: %s", nro, e)
+
             if nuevo_estado == "ENTREGADO":
                 resultado["entregados_detectados"] += 1
             elif nuevo_estado == "NO ENTREGADO":
@@ -1425,6 +1438,384 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
     return resultado
 
 
+# ===== RECONCILIACION PAGOS <-> OPERACION DIARIA =====
+
+def reconciliar_pagos():
+    """
+    Sincroniza la tab PAGOS contra OPERACION DIARIA.
+
+    Flujo:
+    - Para cada fila de PAGOS con pedido_vinculado y estado CONCILIADO_*,
+      asegura que el pedido en OPERACION DIARIA tenga Estado Pago = PAGADO.
+    - Si el pedido ya esta PAGADO no toca nada.
+    - Detecta pedidos marcados PAGADO en OPERACION DIARIA que no tienen
+      fila en PAGOS (huerfanos) para alertar.
+
+    Returns:
+        Dict con {actualizados, huerfanos, sin_pedido, errores}.
+    """
+    from sheets_client import get_pagos, get_pedidos as _get_pedidos
+
+    resultado = {
+        "actualizados": 0,
+        "huerfanos": [],     # Pedidos PAGADO sin fila en PAGOS
+        "sin_pedido": [],    # Filas PAGOS con pedido# que no existe
+        "detalle": [],
+    }
+
+    try:
+        pagos = get_pagos()
+        pedidos = _get_pedidos()
+    except Exception as e:
+        log.warning("Fallo leer sheets en reconciliar_pagos: %s", e)
+        return resultado
+
+    # Indexar pedidos por #
+    ped_por_num = {}
+    for p in pedidos:
+        nro = p.get("#", "").strip()
+        if nro.isdigit():
+            ped_por_num[int(nro)] = p
+
+    # Conjunto de pedidos # que aparecen en PAGOS con estado conciliado
+    pedidos_con_pago = set()
+
+    updates = []
+    for pago in pagos:
+        estado = (pago.get("Estado", "") or "").upper()
+        if not estado.startswith("CONCILIADO"):
+            continue
+
+        vinc_raw = str(pago.get("Pedido Vinculado", "") or pago.get("pedido_vinculado", "")).strip()
+        if not vinc_raw.isdigit():
+            continue
+
+        nro = int(vinc_raw)
+        pedidos_con_pago.add(nro)
+        pedido = ped_por_num.get(nro)
+        if not pedido:
+            resultado["sin_pedido"].append({
+                "pago_fecha": pago.get("Fecha", ""),
+                "pago_monto": pago.get("Monto", ""),
+                "pedido_num": nro,
+            })
+            continue
+
+        if (pedido.get("Estado Pago", "") or "").upper() == "PAGADO":
+            continue
+
+        # Derivar forma_pago del medio
+        medio = (pago.get("Medio", "") or "").lower()
+        if "webpay" in medio:
+            forma = "Webpay"
+        elif "efectivo" in medio:
+            forma = "Efectivo"
+        elif "deposito" in medio:
+            forma = "Deposito"
+        else:
+            forma = "Transferencia"
+
+        upd = {
+            "estado_pago": "PAGADO",
+            "forma_pago": forma,
+            "fecha_pago": pago.get("Fecha", "") or config.now().strftime("%d/%m/%Y"),
+        }
+        updates.append((nro, upd))
+        resultado["detalle"].append({
+            "numero": nro,
+            "monto": pago.get("Monto", ""),
+            "medio": pago.get("Medio", ""),
+        })
+
+    if updates:
+        try:
+            update_pedidos_batch(updates)
+            resultado["actualizados"] = len(updates)
+        except Exception as e:
+            log.warning("Fallo batch update en reconciliar_pagos: %s", e)
+
+    # Detectar huerfanos: pedidos PAGADO en OPERACION DIARIA sin fila en PAGOS
+    for nro, p in ped_por_num.items():
+        if (p.get("Estado Pago", "") or "").upper() == "PAGADO" and nro not in pedidos_con_pago:
+            resultado["huerfanos"].append({
+                "numero": nro,
+                "cliente": p.get("Cliente", ""),
+                "fecha": p.get("Fecha", ""),
+                "forma_pago": p.get("Forma Pago", ""),
+            })
+
+    return resultado
+
+
+# ===== DIAGNOSTICO DE SALUD (read-only, rapido) =====
+
+def diagnostico_salud(dias_estancado=2):
+    """
+    Snapshot de cosas que requieren atencion humana.
+    Solo lee de Sheets (no llama driv.in ni Bsale ni Gmail).
+
+    Args:
+        dias_estancado: minimo de dias desde Fecha para marcar un pedido
+            PENDIENTE como estancado (default 2).
+
+    Returns:
+        Dict con listas y conteos: huerfanos, pagos_sin_pedido, estancados,
+        pendientes_sin_codigo, total_pedidos, totales_por_estado.
+    """
+    from sheets_client import get_pedidos as _gp, get_pagos as _gpg
+
+    resultado = {
+        "huerfanos": [],           # Pedidos PAGADO sin fila en PAGOS
+        "pagos_sin_pedido": [],    # Filas PAGOS con pedido# inexistente
+        "estancados": [],          # Pedidos PENDIENTE con >=N dias
+        "pendientes_sin_codigo": [],  # Pedidos PENDIENTE sin Codigo Drivin
+        "total_pedidos": 0,
+        "totales_por_estado": {},
+    }
+
+    try:
+        pedidos = _gp()
+        pagos = _gpg()
+    except Exception as e:
+        log.warning("Fallo leer Sheets en diagnostico_salud: %s", e)
+        return resultado
+
+    # Indexar pedidos por #
+    ped_por_num = {}
+    for p in pedidos:
+        nro = (p.get("#", "") or "").strip()
+        if nro.isdigit():
+            ped_por_num[int(nro)] = p
+
+    resultado["total_pedidos"] = len(ped_por_num)
+
+    # Conteos por estado
+    por_estado = {}
+    for p in ped_por_num.values():
+        estado = (p.get("Estado Pedido", "") or "SIN ESTADO").strip() or "SIN ESTADO"
+        por_estado[estado] = por_estado.get(estado, 0) + 1
+    resultado["totales_por_estado"] = por_estado
+
+    # Set de pedidos# referenciados desde PAGOS con estado CONCILIADO*
+    pedidos_con_pago = set()
+    for pago in pagos:
+        estado = (pago.get("Estado", "") or "").upper()
+        if not estado.startswith("CONCILIADO"):
+            continue
+        vinc = str(pago.get("Pedido Vinculado", "") or "").strip()
+        if not vinc.isdigit():
+            continue
+        nro = int(vinc)
+        pedidos_con_pago.add(nro)
+        if nro not in ped_por_num:
+            resultado["pagos_sin_pedido"].append({
+                "pedido_num": nro,
+                "monto": pago.get("Monto", ""),
+                "fecha": pago.get("Fecha", ""),
+                "cliente": pago.get("Cliente", ""),
+            })
+
+    hoy = config.now().replace(tzinfo=None)
+    limite_estancado = hoy - timedelta(days=dias_estancado)
+
+    for nro, p in ped_por_num.items():
+        estado_pago = (p.get("Estado Pago", "") or "").upper()
+        estado_pedido = (p.get("Estado Pedido", "") or "").upper()
+        codigo = (p.get("Codigo Drivin", "") or "").strip()
+        fecha_str = p.get("Fecha", "")
+
+        # Huerfanos: PAGADO pero sin fila en PAGOS
+        if estado_pago == "PAGADO" and nro not in pedidos_con_pago:
+            resultado["huerfanos"].append({
+                "numero": nro,
+                "cliente": p.get("Cliente", ""),
+                "fecha": fecha_str,
+                "forma_pago": p.get("Forma Pago", ""),
+                "monto": p.get("Transferencia", "") or p.get("Efectivo", ""),
+            })
+
+        # Estancados: PENDIENTE con >= N dias
+        if estado_pedido in ("PENDIENTE", ""):
+            try:
+                fp = fecha_str.split("/")
+                fecha_dt = datetime(int(fp[2]), int(fp[1]), int(fp[0]))
+                if fecha_dt < limite_estancado:
+                    dias = (hoy - fecha_dt).days
+                    resultado["estancados"].append({
+                        "numero": nro,
+                        "direccion": p.get("Direccion", ""),
+                        "cliente": p.get("Cliente", ""),
+                        "fecha": fecha_str,
+                        "dias": dias,
+                        "codigo": codigo,
+                    })
+            except (ValueError, IndexError):
+                pass
+
+            # Pendientes sin codigo (de hoy o recientes — solo alertamos <= 5 dias)
+            if not codigo:
+                try:
+                    fp = fecha_str.split("/")
+                    fecha_dt = datetime(int(fp[2]), int(fp[1]), int(fp[0]))
+                    if (hoy - fecha_dt).days <= 5:
+                        resultado["pendientes_sin_codigo"].append({
+                            "numero": nro,
+                            "direccion": p.get("Direccion", ""),
+                            "comuna": p.get("Comuna", ""),
+                            "fecha": fecha_str,
+                        })
+                except (ValueError, IndexError):
+                    pass
+
+    # Orden descendente por dias/fecha
+    resultado["estancados"].sort(key=lambda x: -x["dias"])
+    resultado["huerfanos"].sort(key=lambda x: x["fecha"], reverse=True)
+
+    return resultado
+
+
+# ===== POBLAR CLIENTES DESDE OPERACION DIARIA =====
+
+def sync_clientes_from_operacion():
+    """
+    Deriva la tab CLIENTES a partir de OPERACION DIARIA.
+
+    Agrupa por Codigo Drivin (preferido) o por direccion+depto normalizado.
+    Por cada cliente unico, toma los datos del pedido mas reciente y
+    calcula total_pedidos y ultimo_pedido.
+
+    - Upsert: actualiza cliente existente (match por Codigo Drivin o Nombre)
+      o agrega uno nuevo.
+
+    Returns:
+        Dict con {creados, actualizados, total_clientes}.
+    """
+    from sheets_client import get_clientes, add_cliente, update_cliente
+
+    resultado = {"creados": 0, "actualizados": 0, "total_clientes": 0}
+
+    try:
+        pedidos = get_pedidos()
+    except Exception as e:
+        log.warning("Fallo leer OPERACION DIARIA para sync_clientes: %s", e)
+        return resultado
+
+    # Agrupar pedidos por clave de cliente
+    grupos = {}
+    for p in pedidos:
+        codigo = (p.get("Codigo Drivin", "") or "").strip()
+        direccion = (p.get("Direccion", "") or "").strip()
+        depto = (p.get("Depto", "") or "").strip()
+        if codigo:
+            key = f"COD:{codigo}"
+        elif direccion:
+            key = f"ADDR:{_normalize_address(direccion)}|{unidecode(depto).lower().strip()}"
+        else:
+            continue
+
+        # Parsear fecha para ordenar
+        fecha_str = p.get("Fecha", "")
+        try:
+            fp = fecha_str.split("/")
+            fecha_dt = datetime(int(fp[2]), int(fp[1]), int(fp[0]))
+        except (ValueError, IndexError):
+            fecha_dt = None
+
+        g = grupos.setdefault(key, {"pedidos": [], "ultimo": None, "ultimo_dt": None})
+        g["pedidos"].append(p)
+        if fecha_dt and (g["ultimo_dt"] is None or fecha_dt > g["ultimo_dt"]):
+            g["ultimo_dt"] = fecha_dt
+            g["ultimo"] = p
+
+    # Cargar clientes existentes, indexados por codigo y por nombre
+    try:
+        existentes = get_clientes()
+    except Exception as e:
+        log.warning("Fallo leer CLIENTES: %s", e)
+        existentes = []
+
+    por_codigo = {}
+    por_nombre = {}
+    for c in existentes:
+        cod = (c.get("Codigo Drivin", "") or "").strip()
+        nom = (c.get("Nombre", "") or "").strip().lower()
+        if cod:
+            por_codigo[cod] = c
+        if nom:
+            por_nombre[nom] = c
+
+    for key, g in grupos.items():
+        ultimo = g["ultimo"] or g["pedidos"][0]
+        codigo = (ultimo.get("Codigo Drivin", "") or "").strip()
+        nombre = (ultimo.get("Cliente", "") or "").strip()
+        if not nombre:
+            # Sin nombre no podemos diferenciar de otros sin-nombre → skip
+            continue
+
+        data = {
+            "nombre": nombre,
+            "telefono": (ultimo.get("Telefono", "") or "").strip(),
+            "email": (ultimo.get("Email", "") or "").strip(),
+            "direccion": (ultimo.get("Direccion", "") or "").strip(),
+            "depto": (ultimo.get("Depto", "") or "").strip(),
+            "comuna": (ultimo.get("Comuna", "") or "").strip(),
+            "codigo_drivin": codigo,
+            "marca": (ultimo.get("Marca", "") or "KOWEN").strip(),
+            "total_pedidos": len(g["pedidos"]),
+            "ultimo_pedido": ultimo.get("Fecha", ""),
+        }
+
+        # Buscar match: primero por codigo, luego por nombre exacto
+        existente = None
+        if codigo and codigo in por_codigo:
+            existente = por_codigo[codigo]
+        elif nombre.lower() in por_nombre:
+            existente = por_nombre[nombre.lower()]
+
+        if existente:
+            # Solo actualizar si algun campo cambio
+            cambios = {}
+            mapeo = {
+                "telefono": "Telefono",
+                "email": "Email",
+                "direccion": "Direccion",
+                "depto": "Depto",
+                "comuna": "Comuna",
+                "codigo_drivin": "Codigo Drivin",
+                "marca": "Marca",
+                "total_pedidos": "Total Pedidos",
+                "ultimo_pedido": "Ultimo Pedido",
+            }
+            for k_src, k_sheet in mapeo.items():
+                nuevo = str(data[k_src])
+                actual = str(existente.get(k_sheet, "") or "")
+                if nuevo and nuevo != actual:
+                    cambios[k_src] = nuevo
+            if cambios:
+                nombre_existente = existente.get("Nombre", "")
+                if not nombre_existente:
+                    # Fila CLIENTES sin nombre (matcheada por codigo). No hay forma
+                    # de update_cliente sin key; saltar silenciosamente.
+                    continue
+                try:
+                    update_cliente(nombre_existente, cambios)
+                    resultado["actualizados"] += 1
+                except Exception as e:
+                    log.warning("Fallo update_cliente %s: %s", nombre, e)
+        else:
+            try:
+                add_cliente(data)
+                resultado["creados"] += 1
+                por_nombre[nombre.lower()] = data  # evitar duplicados en misma corrida
+                if codigo:
+                    por_codigo[codigo] = data
+            except Exception as e:
+                log.warning("Fallo add_cliente %s: %s", nombre, e)
+
+    resultado["total_clientes"] = len(grupos)
+    return resultado
+
+
 # ===== RUTINA DIARIA =====
 
 def rutina_diaria(fecha_hoy=None):
@@ -1447,7 +1838,7 @@ def rutina_diaria(fecha_hoy=None):
     from log_client import log_rutina, log_error
 
     if not fecha_hoy:
-        fecha_hoy = datetime.now().strftime("%d/%m/%Y")
+        fecha_hoy = config.now().strftime("%d/%m/%Y")
 
     # Calcular fecha de ayer
     parts = fecha_hoy.split("/")
@@ -1560,8 +1951,8 @@ def rutina_diaria(fecha_hoy=None):
                 try:
                     delete_pedido(int(nro))
                     resultado["duplicados_eliminados"] += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("Fallo eliminar duplicado pedido #%s: %s", nro, e)
 
     # --- PASO 4: Revisar Bsale vs planilla (alerta, NO importar) ---
     # Regla del negocio: la planilla Kowen manda. Los pedidos web se pasan
@@ -1694,17 +2085,40 @@ def rutina_diaria(fecha_hoy=None):
             "entregados_detectados": verificacion["entregados_detectados"],
             "estancados": len(verificacion["estancados"]),
             "planes_sin_despachar": len(verificacion["planes_sin_despachar"]),
+            "efectivo_detectado": verificacion.get("efectivo_detectado", 0),
         }
     except Exception as e:
         resultado["errores"].append(f"Error verificando contra driv.in: {e}")
+
+    # --- PASO 9: Reconciliar PAGOS <-> OPERACION DIARIA ---
+    try:
+        rec = reconciliar_pagos()
+        resultado["reconciliacion_pagos"] = {
+            "actualizados": rec["actualizados"],
+            "huerfanos": len(rec["huerfanos"]),
+            "sin_pedido": len(rec["sin_pedido"]),
+        }
+    except Exception as e:
+        resultado["errores"].append(f"Error reconciliando pagos: {e}")
+
+    # --- PASO 10: Poblar/actualizar CLIENTES desde OPERACION DIARIA ---
+    try:
+        cli = sync_clientes_from_operacion()
+        resultado["clientes"] = {
+            "creados": cli["creados"],
+            "actualizados": cli["actualizados"],
+            "total": cli["total_clientes"],
+        }
+    except Exception as e:
+        resultado["errores"].append(f"Error sincronizando clientes: {e}")
 
     # --- Registrar en log ---
     try:
         log_rutina(resultado)
         for err in resultado.get("errores", []):
             log_error("rutina_diaria", err, detalle=fecha_hoy)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("Fallo registrar rutina en LOG tab: %s", e)
 
     return resultado
 
@@ -1722,7 +2136,7 @@ def resumen_dia(fecha=None):
         Dict con totales y conteos.
     """
     if not fecha:
-        fecha = datetime.now().strftime("%d/%m/%Y")
+        fecha = config.now().strftime("%d/%m/%Y")
 
     pedidos = get_pedidos(fecha)
 

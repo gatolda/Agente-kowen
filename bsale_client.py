@@ -3,21 +3,24 @@ Cliente de Bsale API para Agente Kowen.
 Obtiene pedidos web (ventas desde la tienda online).
 """
 
-import os
+import logging
 import requests
 from datetime import datetime, timezone
 
+from config import BSALE_API_TOKEN, BSALE_PEDIDO_WEB_TYPE_ID
+
+log = logging.getLogger("kowen.bsale")
+
 BASE_URL = "https://api.bsale.cl/v1"
-PEDIDO_WEB_TYPE_ID = int(os.getenv("BSALE_PEDIDO_WEB_TYPE_ID", "32"))
+PEDIDO_WEB_TYPE_ID = BSALE_PEDIDO_WEB_TYPE_ID
 TIMEOUT = 30  # segundos
 
 
 def _get_headers():
     """Retorna headers de autenticacion."""
-    token = os.getenv("BSALE_API_TOKEN")
-    if not token:
+    if not BSALE_API_TOKEN:
         raise ValueError("BSALE_API_TOKEN no configurada en .env")
-    return {"access_token": token}
+    return {"access_token": BSALE_API_TOKEN}
 
 
 def _request(endpoint, params=None):
@@ -175,11 +178,11 @@ def _get_order_detail(doc_id):
                     resp = requests.get(variant_href, headers=_get_headers(), timeout=TIMEOUT)
                     if resp.ok:
                         descripcion = resp.json().get("description", "")
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("Fallo obtener variante Bsale %s: %s", variant_href, e)
             return int(cantidad), descripcion
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("Fallo obtener items de orden Bsale: %s", e)
     return 0, ""
 
 

@@ -3,10 +3,13 @@ Cliente de logging para Agente Kowen.
 Registra eventos, errores y resultados de rutinas en la hoja LOG de Google Sheets.
 """
 
+import logging
 from datetime import datetime, timedelta
 from sheets_client import (
     _ensure_log_tab, _read_sheet, _append_sheet, TAB_LOG,
 )
+
+_stdlog = logging.getLogger("kowen.log_client")
 
 
 def log_event(tipo, accion, detalle="", resultado="", origen="sistema"):
@@ -24,8 +27,9 @@ def log_event(tipo, accion, detalle="", resultado="", origen="sistema"):
         _ensure_log_tab()
         now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         _append_sheet(TAB_LOG, [[now, tipo, accion, detalle, resultado, origen]])
-    except Exception:
-        pass  # El log nunca debe romper la operacion principal
+    except Exception as e:
+        # El log en Sheets nunca debe romper la operacion principal — pero dejamos rastro en stdlog
+        _stdlog.warning("Fallo escribir LOG tab (%s/%s): %s", tipo, accion, e)
 
 
 def log_rutina(resultado):

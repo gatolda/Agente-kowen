@@ -17,8 +17,8 @@ _cache_dir = os.path.join(os.path.dirname(__file__), ".streamlit", "cache")
 if os.path.exists(_cache_dir):
     try:
         shutil.rmtree(_cache_dir)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[warn] No se pudo limpiar cache Streamlit: {e}")
 
 import sheets_client
 import operations
@@ -26,6 +26,9 @@ import log_client
 import bsale_client
 import drivin_client
 import address_matcher
+import observability
+
+observability.init_sentry(component="streamlit")
 
 
 # --- Configuracion ---
@@ -191,302 +194,223 @@ with st.sidebar:
     st.markdown('<div class="sidebar-logo">KOWEN</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="sidebar-date">{datetime.now().strftime("%A %d / %B / %Y")}</div>', unsafe_allow_html=True)
 
-    # --- ARMAR RUTA DEL DIA ---
-    st.markdown("---")
-    if st.button("🚀  ARMAR RUTA DEL DÍA", key="btn_rutina", use_container_width=True, type="primary"):
-        with st.spinner("Ejecutando rutina diaria..."):
-            try:
-                resultado = operations.rutina_diaria()
-                lines = []
-                if resultado["entregados_ayer"] or resultado["movidos_a_hoy"]:
-                    lines.append(f"**Ayer ({resultado['fecha_ayer']}):**")
-                    lines.append(f"  Entregados: {resultado['entregados_ayer']}")
-                    lines.append(f"  Movidos a hoy: {resultado['movidos_a_hoy']}")
-                if resultado["planilla_importados"]:
-                    lines.append(f"Planilla: +{resultado['planilla_importados']} pedidos")
-                if resultado.get("cactus_importados"):
-                    lines.append(f"Cactus: +{resultado['cactus_importados']} pedidos")
-                bsale_pend = resultado.get("bsale_pendientes", [])
-                if bsale_pend:
-                    lines.append(f"⚠️ {len(bsale_pend)} pedidos Bsale sin planilla (pasar manualmente)")
-                if resultado["codigos_asignados"]:
-                    lines.append(f"Códigos asignados: {resultado['codigos_asignados']}")
-                if resultado.get("drivin_subidos"):
-                    lines.append(f"driv.in: {resultado['drivin_subidos']} subidos al plan **{resultado.get('drivin_plan', '')}**")
-                    # Conectar al plan creado
-                    token = resultado.get("drivin_token", "")
-                    if token:
-                        st.session_state.scenario_token = token
-                        st.session_state.scenario_name = resultado.get("drivin_plan", "")
-                if resultado["errores"]:
-                    for err in resultado["errores"]:
-                        lines.append(f"⚠️ {err}")
-                if lines:
-                    st.success("\n\n".join(lines))
-                else:
-                    st.info("Sin cambios. Todo al día.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error: {e}")
+    st.caption("La rutina diaria corre automatica 7am lun-vie. Usa 🔧 Mantenimiento si necesitas forzarla.")
 
     # --- Agregar pedido manual ---
     st.markdown("---")
-    with st.expander("➕  Agregar pedido", expanded=False):
+    with st.expander("➕  Agregar pedido manual", expanded=True):
+        import frontend_helpers as fh
+        from streamlit_searchbox import st_searchbox
+
         addr_cache = st.session_state.addresses_cache
 
-        new_dir_search = st.text_input("Buscar direccion", placeholder="Escriba para buscar...", key="addr_search")
+        # Cargar cache de clientes una vez por sesion (invalidar con boton si hace falta)
+        if "clientes_cache" not in st.session_state:
+            try:
+                st.session_state.clientes_cache = sheets_client.get_clientes()
+            except Exception:
+                st.session_state.clientes_cache = []
 
-        selected_addr_code = ""
-        auto_dir = new_dir_search
-        auto_comuna = ""
+        # Inicializar datos del form
+        if "nuevo_pedido_data" not in st.session_state:
+            st.session_state.nuevo_pedido_data = {
+                "cliente": "", "telefono": "", "email": "",
+                "direccion": "", "depto": "", "comuna": "",
+                "codigo_drivin": "", "marca": "KOWEN",
+            }
 
-        if new_dir_search and len(new_dir_search) >= 3 and addr_cache:
-            from unidecode import unidecode
-            search_norm = unidecode(new_dir_search).lower()
+        def _search_fn(query):
+            results = fh.search_unified(
+                query,
+                st.session_state.clientes_cache,
+                addr_cache,
+                limit=10,
+            )
+            return [(r["label"], r["key"]) for r in results]
 
-            def _get(a, k):
-                return a.get(k, "") if isinstance(a, dict) else getattr(a, k, "")
+        selected_key = st_searchbox(
+            _search_fn,
+            placeholder="Buscar cliente, tel, email o direccion…",
+            key="searchbox_cliente",
+            clear_on_submit=False,
+        )
 
-            matches = []
-            for a in addr_cache:
-                text = unidecode(f"{_get(a, 'name')} {_get(a, 'address1')}").lower()
-                if search_norm in text:
-                    matches.append(a)
-                if len(matches) >= 10:
-                    break
+        # Si el usuario selecciono algo, auto-rellenar
+        if selected_key and selected_key != st.session_state.get("last_selected_key"):
+            st.session_state.last_selected_key = selected_key
+            if selected_key.startswith("cli::"):
+                nombre = selected_key[5:]
+                for c in st.session_state.clientes_cache:
+                    if c.get("Nombre") == nombre:
+                        st.session_state.nuevo_pedido_data = fh.cliente_to_form_data(c)
+                        break
+            elif selected_key.startswith("dir::"):
+                for a in (addr_cache or []):
+                    code = a.get("code", "") if isinstance(a, dict) else getattr(a, "code", "")
+                    addr = a.get("address1", "") if isinstance(a, dict) else getattr(a, "address1", "")
+                    if f"dir::{code or addr}" == selected_key:
+                        city = a.get("city", "") if isinstance(a, dict) else getattr(a, "city", "")
+                        name = a.get("name", "") if isinstance(a, dict) else getattr(a, "name", "")
+                        st.session_state.nuevo_pedido_data = fh.direccion_to_form_data({
+                            "codigo_drivin": code,
+                            "direccion": addr,
+                            "comuna": city,
+                            "nombre_ref": name,
+                        })
+                        break
+            st.rerun()
 
-            if matches:
-                labels = [f"{_get(a, 'address1')} - {_get(a, 'name')} [{_get(a, 'code')}]" for a in matches]
-                sel = st.selectbox("Coincidencias", labels, key="addr_match_sel")
-                idx = labels.index(sel)
-                selected_addr_code = _get(matches[idx], "code")
-                auto_dir = _get(matches[idx], "address1")
-                auto_comuna = _get(matches[idx], "city")
-            else:
-                st.caption("Sin coincidencias — direccion nueva")
+        data = st.session_state.nuevo_pedido_data
+
+        # Deteccion de duplicado: pedidos hoy para mismo cliente/dir/codigo
+        try:
+            _pedidos_hoy = sheets_client.get_pedidos(datetime.now().strftime("%d/%m/%Y"))
+        except Exception:
+            _pedidos_hoy = []
+        dups = fh.pedidos_mismo_cliente_hoy(
+            _pedidos_hoy,
+            cliente=data.get("cliente"),
+            direccion=data.get("direccion"),
+            codigo_drivin=data.get("codigo_drivin"),
+        )
+        if dups and (data.get("cliente") or data.get("direccion")):
+            st.warning(
+                f"⚠️ Ya hay {len(dups)} pedido(s) hoy para este cliente/direccion: "
+                + ", ".join(f"#{p.get('#', '?')}" for p in dups[:5])
+            )
 
         with st.form("form_nuevo_pedido", clear_on_submit=True):
             new_fecha = st.date_input("Fecha del pedido", value=datetime.now().date(), key="new_fecha")
-            new_dir = st.text_input("Direccion", value=auto_dir)
+            new_dir = st.text_input("Direccion", value=data["direccion"])
             c1, c2 = st.columns(2)
             with c1:
-                new_depto = st.text_input("Depto", placeholder="1511")
+                new_depto = st.text_input("Depto", value=data["depto"], placeholder="1511")
             with c2:
-                new_comuna = st.text_input("Comuna", value=auto_comuna)
+                new_comuna = st.text_input("Comuna", value=data["comuna"])
             c3, c4 = st.columns(2)
             with c3:
                 new_cant = st.number_input("Cant", min_value=0, value=3, step=1)
             with c4:
-                new_marca = st.selectbox("Marca", ["KOWEN", "CACTUS"])
+                marca_default = data.get("marca", "KOWEN") or "KOWEN"
+                marca_idx = ["KOWEN", "CACTUS"].index(marca_default) if marca_default in ["KOWEN", "CACTUS"] else 0
+                new_marca = st.selectbox("Marca", ["KOWEN", "CACTUS"], index=marca_idx)
             c5, c6 = st.columns(2)
             with c5:
                 new_canal = st.selectbox("Canal", ["MANUAL", "WSP", "EMAIL", "WEB"])
             with c6:
                 new_doc = st.selectbox("Doc", ["Boleta", "Factura", "Guia", "Ticket"])
-            new_cliente = st.text_input("Cliente", placeholder="Nombre")
-            new_telefono = st.text_input("Telefono", placeholder="912345678")
-            new_email = st.text_input("Email", placeholder="correo@ejemplo.com")
+            new_cliente = st.text_input("Cliente", value=data["cliente"], placeholder="Nombre")
+            new_telefono = st.text_input("Telefono", value=data["telefono"], placeholder="912345678")
+            new_email = st.text_input("Email", value=data["email"], placeholder="correo@ejemplo.com")
+            new_codigo = st.text_input("Codigo drivin", value=data["codigo_drivin"], placeholder="auto si se detecta")
             new_obs = st.text_input("Obs", placeholder="Ej: retirar bidones")
 
-            if st.form_submit_button("Agregar pedido", type="primary", use_container_width=True):
-                if new_dir:
-                    num = sheets_client.add_pedido({
-                        "fecha": new_fecha.strftime("%d/%m/%Y"),
-                        "direccion": new_dir, "depto": new_depto, "comuna": new_comuna,
-                        "codigo_drivin": selected_addr_code, "cant": new_cant,
-                        "marca": new_marca, "documento": new_doc, "canal": new_canal,
-                        "cliente": new_cliente, "telefono": new_telefono, "email": new_email,
-                        "observaciones": new_obs,
-                        "estado_pedido": "PENDIENTE", "estado_pago": "PENDIENTE",
-                    })
-                    st.success(f"Pedido #{num} agregado!")
-                    if new_cliente:
-                        existing = sheets_client.find_cliente(new_cliente)
-                        if not existing:
-                            sheets_client.add_cliente({
-                                "nombre": new_cliente, "telefono": new_telefono,
-                                "email": new_email, "direccion": new_dir,
-                                "depto": new_depto, "comuna": new_comuna,
-                                "codigo_drivin": selected_addr_code, "marca": new_marca,
-                            })
-                            st.info(f"Cliente '{new_cliente}' registrado.")
-                    st.rerun()
+            col_sub, col_reset = st.columns([3, 1])
+            submitted = col_sub.form_submit_button("Agregar pedido", type="primary", use_container_width=True)
+            reset = col_reset.form_submit_button("Limpiar", use_container_width=True)
 
-    # --- Importar Bsale ---
-    with st.expander("🌐  Importar desde Bsale", expanded=False):
-        bsale_fecha = st.date_input("Fecha destino", value=datetime.now().date(), key="bsale_fecha")
+            if reset:
+                st.session_state.nuevo_pedido_data = {
+                    "cliente": "", "telefono": "", "email": "",
+                    "direccion": "", "depto": "", "comuna": "",
+                    "codigo_drivin": "", "marca": "KOWEN",
+                }
+                st.session_state.last_selected_key = None
+                st.rerun()
 
-        if st.button("🔄 Sincronizar pedidos web", key="btn_bsale_check", use_container_width=True):
-            with st.spinner("Consultando Bsale..."):
-                try:
-                    # Buscar ultimo nro Bsale en el sistema
-                    all_p = sheets_client.get_pedidos()
-                    last_bsale = 0
-                    for p in all_p:
-                        b = p.get("Pedido Bsale", "")
-                        if b and b.isdigit():
-                            last_bsale = max(last_bsale, int(b))
-                    # Si no hay, buscar desde un rango razonable
-                    since = max(last_bsale - 5, 1) if last_bsale > 0 else 3480
-
-                    orders = bsale_client.get_web_orders(since)
-                    activos = [o for o in orders if o["estado"] == "activo"]
-                    if activos:
-                        checked = operations.check_bsale_orders(activos)
-                        st.session_state["bsale_checked"] = checked
-
-                        # Auto-matchear direcciones
-                        if not st.session_state.addresses_cache:
-                            address_matcher.refresh_cache()
-                            st.session_state.addresses_cache = address_matcher.load_cache()
-
-                        nuevos = [o for o in checked if not o["existe"]]
-                        matched = []
-                        for o in nuevos:
-                            res, conf = address_matcher.auto_match(
-                                direccion=o.get("direccion", ""),
-                                depto=o.get("depto", ""),
-                                comuna=o.get("comuna", ""),
-                                addresses=st.session_state.addresses_cache,
-                            )
-                            matched.append({"order": o, "result": res, "confidence": conf})
-                        st.session_state["bsale_matched"] = matched
-                    else:
-                        st.warning("Sin pedidos nuevos.")
-                        st.session_state.pop("bsale_checked", None)
-                        st.session_state.pop("bsale_matched", None)
-                except Exception as e:
-                    st.error(f"Error: {e}")
-
-        if st.session_state.get("bsale_checked"):
-            checked = st.session_state["bsale_checked"]
-            nuevos = [o for o in checked if not o["existe"]]
-            existentes = [o for o in checked if o["existe"]]
-
-            if existentes:
-                st.warning(f"**{len(existentes)} ya existen** (se omiten):")
-                for o in existentes:
-                    st.caption(f"~~#{o['pedido_nro']} | {o['direccion']}~~ — {o['motivo']}")
-
-            matched = st.session_state.get("bsale_matched", [])
-            if matched:
-                st.success(f"**{len(matched)} nuevos:**")
-                bsale_codes = {}
-                for i, m in enumerate(matched):
-                    o = m["order"]
-                    conf = m["confidence"]
-                    res = m["result"]
-                    code = ""
-
-                    if conf == "auto":
-                        code = res
-                        st.caption(f"✅ #{o['pedido_nro']} | {o['direccion']} | {o.get('cantidad',0)} bot → `{code}`")
-                    elif conf == "ambiguous" and res:
-                        opts = [f"{c.code} - {c.name}" for c in res]
-                        sel = st.selectbox(f"#{o['pedido_nro']} {o['direccion']}", opts, key=f"bs_sel_{i}")
-                        code = res[opts.index(sel)].code
-                    else:
-                        code = st.text_input(f"#{o['pedido_nro']} {o['direccion']} (sin match)", key=f"bs_man_{i}", placeholder="Codigo drivin...")
-
-                    bsale_codes[i] = code
-
-                # Boton importar + subir
-                has_plan = st.session_state.scenario_token is not None
-                btn_label = f"Importar {len(matched)} + subir a driv.in" if has_plan else f"Importar {len(matched)} pedidos"
-                if not has_plan:
-                    st.caption("Conecta un plan driv.in para subirlos automaticamente.")
-
-                if st.button(btn_label, key="btn_bsale_go", type="primary", use_container_width=True):
-                    fecha_dest = bsale_fecha.strftime("%d/%m/%Y")
-                    fecha_suffix = bsale_fecha.strftime("%m%d")
-
-                    # 1. Guardar en planilla + memoria de correcciones
-                    pedidos_nuevos = []
-                    for i, m in enumerate(matched):
-                        o = m["order"]
-                        code = bsale_codes.get(i, "")
-                        conf = m["confidence"]
-                        # Guardar en memoria si fue seleccion manual
-                        if conf in ("ambiguous", "none") and code:
-                            address_matcher.save_memory_entry(o.get("direccion", ""), code)
-                            log_client.log_match_manual(o.get("direccion", ""), code)
-                        pedidos_nuevos.append({
-                            "fecha": fecha_dest,
-                            "direccion": o.get("direccion", ""),
-                            "depto": o.get("depto", ""),
-                            "comuna": o.get("comuna", ""),
-                            "codigo_drivin": code,
-                            "cant": o.get("cantidad", 0),
-                            "marca": o.get("marca", "KOWEN").upper(),
-                            "cliente": o.get("cliente", ""),
-                            "telefono": o.get("telefono", ""),
-                            "email": o.get("email", ""),
-                            "canal": "WEB",
-                            "estado_pedido": "PENDIENTE",
-                            "estado_pago": "PENDIENTE",
-                            "pedido_bsale": str(o["pedido_nro"]),
-                            "plan_drivin": st.session_state.scenario_name or "",
+            if submitted and new_dir:
+                num = sheets_client.add_pedido({
+                    "fecha": new_fecha.strftime("%d/%m/%Y"),
+                    "direccion": new_dir, "depto": new_depto, "comuna": new_comuna,
+                    "codigo_drivin": new_codigo, "cant": new_cant,
+                    "marca": new_marca, "documento": new_doc, "canal": new_canal,
+                    "cliente": new_cliente, "telefono": new_telefono, "email": new_email,
+                    "observaciones": new_obs,
+                    "estado_pedido": "PENDIENTE", "estado_pago": "PENDIENTE",
+                })
+                st.success(f"Pedido #{num} agregado!")
+                if new_cliente:
+                    existing = sheets_client.find_cliente(new_cliente)
+                    if not existing:
+                        sheets_client.add_cliente({
+                            "nombre": new_cliente, "telefono": new_telefono,
+                            "email": new_email, "direccion": new_dir,
+                            "depto": new_depto, "comuna": new_comuna,
+                            "codigo_drivin": new_codigo, "marca": new_marca,
                         })
-                    nums = sheets_client.add_pedidos(pedidos_nuevos)
-                    st.success(f"{len(nums)} pedidos guardados en planilla.")
+                        st.info(f"Cliente '{new_cliente}' registrado.")
+                        # Invalidar cache de clientes para que aparezca en el proximo search
+                        st.session_state.pop("clientes_cache", None)
+                st.session_state.nuevo_pedido_data = {
+                    "cliente": "", "telefono": "", "email": "",
+                    "direccion": "", "depto": "", "comuna": "",
+                    "codigo_drivin": "", "marca": "KOWEN",
+                }
+                st.session_state.last_selected_key = None
+                st.rerun()
 
-                    # 2. Subir a driv.in si hay plan
-                    if has_plan:
-                        clients = []
-                        for i, m in enumerate(matched):
-                            code = bsale_codes.get(i, "")
-                            if not code:
-                                continue
-                            o = m["order"]
-                            marca = o.get("marca", "Kowen")
-                            cant = int(o.get("cantidad", 0))
-                            desc = f"{marca} - Retiro" if cant == 0 else marca
-                            order_code = f"{code}-{fecha_suffix}"
-                            clients.append({
-                                "code": code,
-                                "orders": [{"code": order_code, "description": desc, "units_1": cant}]
+    # --- Plan driv.in ---
+    with st.expander("🚛  Plan driv.in", expanded=True):
+        if st.session_state.scenario_token:
+            st.success(f"**{st.session_state.scenario_name}**")
+            st.caption(f"`{st.session_state.scenario_token}`")
+            if st.button("Desconectar", use_container_width=True, key="btn_desconectar"):
+                st.session_state.scenario_token = None
+                st.session_state.scenario_name = None
+                st.rerun()
+        else:
+            plan_tab1, plan_tab2, plan_tab3 = st.tabs(["Recientes", "Nuevo", "Token"])
+
+            with plan_tab1:
+                planes = []
+                for delta in range(0, 3):
+                    fecha_b = (datetime.now() + timedelta(days=delta)).strftime("%Y-%m-%d")
+                    try:
+                        r = drivin_client.get_scenarios_by_date(fecha_b)
+                        for s in r.get("response", []):
+                            planes.append({
+                                "label": f"{s.get('description', '')} ({fecha_b})",
+                                "token": s.get("token", s.get("scenario_token", "")),
+                                "name": s.get("description", ""),
                             })
-                        if clients:
-                            try:
-                                r = drivin_client.create_orders(
-                                    clients=clients,
-                                    scenario_token=st.session_state.scenario_token,
-                                )
-                                added = r.get("response", r).get("added", [])
-                                st.success(f"{len(added)} pedidos subidos a driv.in!")
-                            except Exception as e:
-                                st.error(f"Error driv.in: {e}")
+                    except Exception as e:
+                        print(f"[warn] get_scenarios_by_date {fecha_b} falló: {e}")
+                if planes:
+                    labels = [p["label"] for p in planes]
+                    sel_idx = st.selectbox("Plan", range(len(labels)), format_func=lambda i: labels[i])
+                    if st.button("Conectar", key="btn_con_rec", use_container_width=True):
+                        st.session_state.scenario_token = planes[sel_idx]["token"]
+                        st.session_state.scenario_name = planes[sel_idx]["name"]
+                        st.rerun()
+                else:
+                    st.caption("Sin planes recientes")
 
-                    st.session_state.pop("bsale_checked", None)
-                    st.session_state.pop("bsale_matched", None)
-                    st.rerun()
-            elif not existentes:
-                st.info("Sin pedidos nuevos.")
+            with plan_tab2:
+                plan_date = st.date_input("Fecha", value=datetime.now().date(), key="plan_date")
+                plan_name = st.text_input("Nombre", value=f"{plan_date.strftime('%d/%m/%Y')}API")
+                if st.button("Crear", key="btn_crear", use_container_width=True):
+                    with st.spinner("Creando..."):
+                        try:
+                            r = drivin_client._request("POST", "scenarios", json_body={
+                                "description": plan_name,
+                                "date": plan_date.strftime("%Y-%m-%d"),
+                                "schema_name": "Optimización", "clients": [],
+                            })
+                            resp = r.get("response", r)
+                            st.session_state.scenario_token = resp.get("scenario_token", "")
+                            st.session_state.scenario_name = plan_name
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"{e}")
 
-    # --- Limpiar planilla ---
-    with st.expander("⚠️  Limpiar pedidos", expanded=False):
-        st.caption("Elimina todos los pedidos de una fecha.")
-        clean_date = st.date_input("Fecha a limpiar", value=datetime.now().date(), key="clean_date")
-        clean_fecha = clean_date.strftime("%d/%m/%Y")
-        if st.button(f"Borrar pedidos del {clean_fecha}", key="btn_clean", use_container_width=True):
-            st.session_state["confirm_clean"] = clean_fecha
-        if st.session_state.get("confirm_clean"):
-            cf = st.session_state["confirm_clean"]
-            st.error(f"¿Borrar TODOS los pedidos del **{cf}**?")
-            cc1, cc2 = st.columns(2)
-            with cc1:
-                if st.button("Si, borrar", key="btn_clean_yes", use_container_width=True):
-                    ps = sheets_client.get_pedidos(cf)
-                    nums = [int(p["#"]) for p in ps if p.get("#", "").isdigit()]
-                    for n in sorted(nums, reverse=True):
-                        sheets_client.delete_pedido(n)
-                    st.session_state.pop("confirm_clean", None)
-                    st.success(f"{len(nums)} pedidos eliminados.")
-                    st.rerun()
-            with cc2:
-                if st.button("Cancelar", key="btn_clean_no", use_container_width=True):
-                    st.session_state.pop("confirm_clean", None)
-                    st.rerun()
+            with plan_tab3:
+                ext_t = st.text_input("Token")
+                ext_n = st.text_input("Nombre", value="Plan")
+                if st.button("Conectar", key="btn_con_tok", use_container_width=True):
+                    if ext_t:
+                        st.session_state.scenario_token = ext_t
+                        st.session_state.scenario_name = ext_n
+                        st.rerun()
 
     # --- Limpiar entregados ---
     with st.expander("✅  Limpiar entregados", expanded=False):
@@ -571,130 +495,260 @@ with st.sidebar:
                 st.session_state.pop("clean_ent_result", None)
                 st.rerun()
 
-    # --- Importar desde driv.in ---
-    with st.expander("🚛  Importar desde driv.in", expanded=False):
-        imp_date = st.date_input("Fecha", value=datetime.now().date(), key="imp_drivin_date")
-        imp_fecha = imp_date.strftime("%d/%m/%Y")
-        # Buscar planes de esa fecha
-        imp_planes = []
-        try:
-            r = drivin_client.get_scenarios_by_date(imp_date.strftime("%Y-%m-%d"))
-            for s in r.get("response", []):
-                imp_planes.append({"label": s.get("description", ""), "token": s.get("token", s.get("scenario_token", ""))})
-        except Exception:
-            pass
-        if imp_planes:
-            imp_labels = [p["label"] for p in imp_planes]
-            imp_sel = st.selectbox("Plan", imp_labels, key="imp_drivin_plan")
-            imp_token = imp_planes[imp_labels.index(imp_sel)]["token"]
-            if st.button("Importar pedidos de ruta", key="btn_imp_drivin", use_container_width=True):
-                with st.spinner("Importando desde driv.in..."):
+    # --- Mantenimiento (todo lo que el cron hace solo) ---
+    st.markdown("---")
+    with st.expander("🔧  Mantenimiento", expanded=False):
+        st.caption("Acciones que el cron corre solo. Usa si necesitas forzar.")
+        m_t1, m_t2, m_t3, m_t4, m_t5, m_t6 = st.tabs(
+            ["Rutina", "Bsale", "P. Reparto", "P. Cactus", "Limpiar", "Cache"]
+        )
+
+        # --- Rutina ---
+        with m_t1:
+            if st.button("🚀 Forzar rutina diaria", key="btn_rutina", use_container_width=True, type="primary"):
+                with st.spinner("Ejecutando rutina diaria..."):
                     try:
-                        count = operations.import_from_drivin(imp_token, imp_fecha)
+                        resultado = operations.rutina_diaria()
+                        lines = []
+                        if resultado["entregados_ayer"] or resultado["movidos_a_hoy"]:
+                            lines.append(f"**Ayer ({resultado['fecha_ayer']}):**")
+                            lines.append(f"  Entregados: {resultado['entregados_ayer']}")
+                            lines.append(f"  Movidos a hoy: {resultado['movidos_a_hoy']}")
+                        if resultado["planilla_importados"]:
+                            lines.append(f"Planilla: +{resultado['planilla_importados']} pedidos")
+                        if resultado.get("cactus_importados"):
+                            lines.append(f"Cactus: +{resultado['cactus_importados']} pedidos")
+                        bsale_pend = resultado.get("bsale_pendientes", [])
+                        if bsale_pend:
+                            lines.append(f"⚠️ {len(bsale_pend)} pedidos Bsale sin planilla (pasar manualmente)")
+                        if resultado["codigos_asignados"]:
+                            lines.append(f"Códigos asignados: {resultado['codigos_asignados']}")
+                        if resultado.get("drivin_subidos"):
+                            lines.append(f"driv.in: {resultado['drivin_subidos']} subidos al plan **{resultado.get('drivin_plan', '')}**")
+                            token = resultado.get("drivin_token", "")
+                            if token:
+                                st.session_state.scenario_token = token
+                                st.session_state.scenario_name = resultado.get("drivin_plan", "")
+                        if resultado["errores"]:
+                            for err in resultado["errores"]:
+                                lines.append(f"⚠️ {err}")
+                        if lines:
+                            st.success("\n\n".join(lines))
+                        else:
+                            st.info("Sin cambios. Todo al día.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+        # --- Bsale ---
+        with m_t2:
+            bsale_fecha = st.date_input("Fecha destino", value=datetime.now().date(), key="bsale_fecha")
+
+            if st.button("🔄 Sincronizar pedidos web", key="btn_bsale_check", use_container_width=True):
+                with st.spinner("Consultando Bsale..."):
+                    try:
+                        all_p = sheets_client.get_pedidos()
+                        last_bsale = 0
+                        for p in all_p:
+                            b = p.get("Pedido Bsale", "")
+                            if b and b.isdigit():
+                                last_bsale = max(last_bsale, int(b))
+                        since = max(last_bsale - 5, 1) if last_bsale > 0 else 3480
+
+                        orders = bsale_client.get_web_orders(since)
+                        activos = [o for o in orders if o["estado"] == "activo"]
+                        if activos:
+                            checked = operations.check_bsale_orders(activos)
+                            st.session_state["bsale_checked"] = checked
+
+                            if not st.session_state.addresses_cache:
+                                address_matcher.refresh_cache()
+                                st.session_state.addresses_cache = address_matcher.load_cache()
+
+                            nuevos = [o for o in checked if not o["existe"]]
+                            matched = []
+                            for o in nuevos:
+                                res, conf = address_matcher.auto_match(
+                                    direccion=o.get("direccion", ""),
+                                    depto=o.get("depto", ""),
+                                    comuna=o.get("comuna", ""),
+                                    addresses=st.session_state.addresses_cache,
+                                )
+                                matched.append({"order": o, "result": res, "confidence": conf})
+                            st.session_state["bsale_matched"] = matched
+                        else:
+                            st.warning("Sin pedidos nuevos.")
+                            st.session_state.pop("bsale_checked", None)
+                            st.session_state.pop("bsale_matched", None)
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+            if st.session_state.get("bsale_checked"):
+                checked = st.session_state["bsale_checked"]
+                nuevos = [o for o in checked if not o["existe"]]
+                existentes = [o for o in checked if o["existe"]]
+
+                if existentes:
+                    st.warning(f"**{len(existentes)} ya existen** (se omiten):")
+                    for o in existentes:
+                        st.caption(f"~~#{o['pedido_nro']} | {o['direccion']}~~ — {o['motivo']}")
+
+                matched = st.session_state.get("bsale_matched", [])
+                if matched:
+                    st.success(f"**{len(matched)} nuevos:**")
+                    bsale_codes = {}
+                    for i, m in enumerate(matched):
+                        o = m["order"]
+                        conf = m["confidence"]
+                        res = m["result"]
+                        code = ""
+
+                        if conf == "auto":
+                            code = res
+                            st.caption(f"✅ #{o['pedido_nro']} | {o['direccion']} | {o.get('cantidad',0)} bot → `{code}`")
+                        elif conf == "ambiguous" and res:
+                            opts = [f"{c.code} - {c.name}" for c in res]
+                            sel = st.selectbox(f"#{o['pedido_nro']} {o['direccion']}", opts, key=f"bs_sel_{i}")
+                            code = res[opts.index(sel)].code
+                        else:
+                            code = st.text_input(f"#{o['pedido_nro']} {o['direccion']} (sin match)", key=f"bs_man_{i}", placeholder="Codigo drivin...")
+
+                        bsale_codes[i] = code
+
+                    has_plan = st.session_state.scenario_token is not None
+                    btn_label = f"Importar {len(matched)} + subir a driv.in" if has_plan else f"Importar {len(matched)} pedidos"
+                    if not has_plan:
+                        st.caption("Conecta un plan driv.in para subirlos automaticamente.")
+
+                    if st.button(btn_label, key="btn_bsale_go", type="primary", use_container_width=True):
+                        fecha_dest = bsale_fecha.strftime("%d/%m/%Y")
+                        fecha_suffix = bsale_fecha.strftime("%m%d")
+
+                        pedidos_nuevos = []
+                        for i, m in enumerate(matched):
+                            o = m["order"]
+                            code = bsale_codes.get(i, "")
+                            conf = m["confidence"]
+                            if conf in ("ambiguous", "none") and code:
+                                address_matcher.save_memory_entry(o.get("direccion", ""), code)
+                                log_client.log_match_manual(o.get("direccion", ""), code)
+                            pedidos_nuevos.append({
+                                "fecha": fecha_dest,
+                                "direccion": o.get("direccion", ""),
+                                "depto": o.get("depto", ""),
+                                "comuna": o.get("comuna", ""),
+                                "codigo_drivin": code,
+                                "cant": o.get("cantidad", 0),
+                                "marca": o.get("marca", "KOWEN").upper(),
+                                "cliente": o.get("cliente", ""),
+                                "telefono": o.get("telefono", ""),
+                                "email": o.get("email", ""),
+                                "canal": "WEB",
+                                "estado_pedido": "PENDIENTE",
+                                "estado_pago": "PENDIENTE",
+                                "pedido_bsale": str(o["pedido_nro"]),
+                                "plan_drivin": st.session_state.scenario_name or "",
+                            })
+                        nums = sheets_client.add_pedidos(pedidos_nuevos)
+                        st.success(f"{len(nums)} pedidos guardados en planilla.")
+
+                        if has_plan:
+                            clients = []
+                            for i, m in enumerate(matched):
+                                code = bsale_codes.get(i, "")
+                                if not code:
+                                    continue
+                                o = m["order"]
+                                marca = o.get("marca", "Kowen")
+                                cant = int(o.get("cantidad", 0))
+                                desc = f"{marca} - Retiro" if cant == 0 else marca
+                                order_code = f"{code}-{fecha_suffix}"
+                                clients.append({
+                                    "code": code,
+                                    "orders": [{"code": order_code, "description": desc, "units_1": cant}]
+                                })
+                            if clients:
+                                try:
+                                    r = drivin_client.create_orders(
+                                        clients=clients,
+                                        scenario_token=st.session_state.scenario_token,
+                                    )
+                                    added = r.get("response", r).get("added", [])
+                                    st.success(f"{len(added)} pedidos subidos a driv.in!")
+                                except Exception as e:
+                                    st.error(f"Error driv.in: {e}")
+
+                        st.session_state.pop("bsale_checked", None)
+                        st.session_state.pop("bsale_matched", None)
+                        st.rerun()
+                elif not existentes:
+                    st.info("Sin pedidos nuevos.")
+
+        # --- Planilla Reparto ---
+        with m_t3:
+            rep_date = st.date_input("Fecha a importar", value=datetime.now().date(), key="rep_date")
+            rep_fecha_str = rep_date.strftime("%d/%m/%Y")
+            if st.button("Importar PRIMER TURNO", key="btn_reparto", use_container_width=True):
+                with st.spinner(f"Leyendo planilla reparto ({rep_fecha_str})..."):
+                    try:
+                        count = operations.sync_from_planilla_reparto(rep_fecha_str)
                         if count > 0:
                             st.success(f"{count} pedidos importados!")
                             st.rerun()
                         else:
-                            st.info("Sin pedidos nuevos.")
+                            st.info("Sin pedidos nuevos para esa fecha.")
                     except Exception as e:
                         st.error(f"Error: {e}")
-        else:
-            st.caption("Sin planes para esa fecha.")
 
-    # --- Importar desde Planilla Reparto ---
-    with st.expander("📊  Importar desde Planilla Reparto", expanded=False):
-        rep_date = st.date_input("Fecha a importar", value=datetime.now().date(), key="rep_date")
-        rep_fecha_str = rep_date.strftime("%d/%m/%Y")
-        if st.button("Importar PRIMER TURNO", key="btn_reparto", use_container_width=True):
-            with st.spinner(f"Leyendo planilla reparto ({rep_fecha_str})..."):
-                try:
-                    count = operations.sync_from_planilla_reparto(rep_fecha_str)
-                    if count > 0:
-                        st.success(f"{count} pedidos importados!")
-                        st.rerun()
-                    else:
-                        st.info("Sin pedidos nuevos para esa fecha.")
-                except Exception as e:
-                    st.error(f"Error: {e}")
-
-    # --- Importar desde Planilla Cactus ---
-    with st.expander("🌵  Importar desde Planilla Cactus", expanded=False):
-        cac_date = st.date_input("Fecha Cactus", value=datetime.now().date(), key="cac_date")
-        cac_fecha_str = cac_date.strftime("%d/%m/%Y")
-        if st.button("Importar Cactus", key="btn_cactus", use_container_width=True):
-            with st.spinner(f"Leyendo planilla Cactus ({cac_fecha_str})..."):
-                try:
-                    count = operations.sync_from_planilla_cactus(cac_fecha_str)
-                    if count > 0:
-                        st.success(f"{count} pedidos Cactus importados!")
-                        st.rerun()
-                    else:
-                        st.info("Sin pedidos Cactus nuevos para esa fecha.")
-                except Exception as e:
-                    st.error(f"Error: {e}")
-
-    # --- Plan driv.in ---
-    with st.expander("🚛  Plan driv.in", expanded=True):
-        if st.session_state.scenario_token:
-            st.success(f"**{st.session_state.scenario_name}**")
-            st.caption(f"`{st.session_state.scenario_token}`")
-            if st.button("Desconectar", use_container_width=True, key="btn_desconectar"):
-                st.session_state.scenario_token = None
-                st.session_state.scenario_name = None
-                st.rerun()
-        else:
-            plan_tab1, plan_tab2, plan_tab3 = st.tabs(["Recientes", "Nuevo", "Token"])
-
-            with plan_tab1:
-                planes = []
-                for delta in range(0, 3):
-                    fecha_b = (datetime.now() + timedelta(days=delta)).strftime("%Y-%m-%d")
+        # --- Planilla Cactus ---
+        with m_t4:
+            cac_date = st.date_input("Fecha Cactus", value=datetime.now().date(), key="cac_date")
+            cac_fecha_str = cac_date.strftime("%d/%m/%Y")
+            if st.button("Importar Cactus", key="btn_cactus", use_container_width=True):
+                with st.spinner(f"Leyendo planilla Cactus ({cac_fecha_str})..."):
                     try:
-                        r = drivin_client.get_scenarios_by_date(fecha_b)
-                        for s in r.get("response", []):
-                            planes.append({
-                                "label": f"{s.get('description', '')} ({fecha_b})",
-                                "token": s.get("token", s.get("scenario_token", "")),
-                                "name": s.get("description", ""),
-                            })
-                    except Exception:
-                        pass
-                if planes:
-                    labels = [p["label"] for p in planes]
-                    sel_idx = st.selectbox("Plan", range(len(labels)), format_func=lambda i: labels[i])
-                    if st.button("Conectar", key="btn_con_rec", use_container_width=True):
-                        st.session_state.scenario_token = planes[sel_idx]["token"]
-                        st.session_state.scenario_name = planes[sel_idx]["name"]
-                        st.rerun()
-                else:
-                    st.caption("Sin planes recientes")
-
-            with plan_tab2:
-                plan_date = st.date_input("Fecha", value=datetime.now().date(), key="plan_date")
-                plan_name = st.text_input("Nombre", value=f"{plan_date.strftime('%d/%m/%Y')}API")
-                if st.button("Crear", key="btn_crear", use_container_width=True):
-                    with st.spinner("Creando..."):
-                        try:
-                            r = drivin_client._request("POST", "scenarios", json_body={
-                                "description": plan_name,
-                                "date": plan_date.strftime("%Y-%m-%d"),
-                                "schema_name": "Optimización", "clients": [],
-                            })
-                            resp = r.get("response", r)
-                            st.session_state.scenario_token = resp.get("scenario_token", "")
-                            st.session_state.scenario_name = plan_name
+                        count = operations.sync_from_planilla_cactus(cac_fecha_str)
+                        if count > 0:
+                            st.success(f"{count} pedidos Cactus importados!")
                             st.rerun()
-                        except Exception as e:
-                            st.error(f"{e}")
+                        else:
+                            st.info("Sin pedidos Cactus nuevos para esa fecha.")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
 
-            with plan_tab3:
-                ext_t = st.text_input("Token")
-                ext_n = st.text_input("Nombre", value="Plan")
-                if st.button("Conectar", key="btn_con_tok", use_container_width=True):
-                    if ext_t:
-                        st.session_state.scenario_token = ext_t
-                        st.session_state.scenario_name = ext_n
+        # --- Limpiar pedidos ---
+        with m_t5:
+            st.caption("Elimina TODOS los pedidos de una fecha.")
+            clean_date = st.date_input("Fecha a limpiar", value=datetime.now().date(), key="clean_date")
+            clean_fecha = clean_date.strftime("%d/%m/%Y")
+            if st.button(f"Borrar pedidos del {clean_fecha}", key="btn_clean", use_container_width=True):
+                st.session_state["confirm_clean"] = clean_fecha
+            if st.session_state.get("confirm_clean"):
+                cf = st.session_state["confirm_clean"]
+                st.error(f"¿Borrar TODOS los pedidos del **{cf}**?")
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    if st.button("Si, borrar", key="btn_clean_yes", use_container_width=True):
+                        ps = sheets_client.get_pedidos(cf)
+                        nums = [int(p["#"]) for p in ps if p.get("#", "").isdigit()]
+                        for n in sorted(nums, reverse=True):
+                            sheets_client.delete_pedido(n)
+                        st.session_state.pop("confirm_clean", None)
+                        st.success(f"{len(nums)} pedidos eliminados.")
                         st.rerun()
+                with cc2:
+                    if st.button("Cancelar", key="btn_clean_no", use_container_width=True):
+                        st.session_state.pop("confirm_clean", None)
+                        st.rerun()
+
+        # --- Cache direcciones ---
+        with m_t6:
+            st.caption("Descarga direcciones de driv.in para autocompletar.")
+            if st.button("🔄 Actualizar cache", key="btn_cache", use_container_width=True):
+                with st.spinner("Descargando..."):
+                    count = address_matcher.refresh_cache()
+                    st.session_state.addresses_cache = address_matcher.load_cache()
+                    st.success(f"{count} direcciones.")
 
     # --- Alertas de errores recurrentes ---
     try:
@@ -704,16 +758,8 @@ with st.sidebar:
             st.markdown('<p class="section-title">Alertas</p>', unsafe_allow_html=True)
             for err in errores_rec:
                 st.warning(f"**{err['accion']}** — {err['conteo']}x en 7 dias. Ej: {err['ejemplo'][:60]}")
-    except Exception:
-        pass
-
-    # --- Herramientas ---
-    st.markdown("---")
-    if st.button("🔄 Actualizar cache", use_container_width=True):
-        with st.spinner("Descargando..."):
-            count = address_matcher.refresh_cache()
-            st.session_state.addresses_cache = address_matcher.load_cache()
-            st.success(f"{count} direcciones.")
+    except Exception as e:
+        print(f"[warn] No se pudieron obtener errores recurrentes: {e}")
 
     st.markdown("---")
     st.caption("Kowen v2.2 — Gestor de Pedidos")
@@ -1452,7 +1498,464 @@ with chat_col:
 
 st.markdown("---")
 
-tab_cl, tab_pg, tab_cr, tab_sync = st.tabs(["👥 Clientes", "💰 Pagos", "📧 Correos", "🔄 Sync driv.in"])
+tab_salud, tab_lotes, tab_rep, tab_cl, tab_pg, tab_cr, tab_sync, tab_log = st.tabs([
+    "🚨 Salud", "📋 Carga rapida", "📊 Reporte", "👥 Clientes", "💰 Pagos", "📧 Correos", "🔄 Sync driv.in", "🗂 Log",
+])
+
+with tab_salud:
+    st.markdown("##### Salud del sistema")
+    st.caption("Todo lo que requiere accion humana, en un solo lugar.")
+
+    col_ref, col_dias = st.columns([1, 1])
+    with col_ref:
+        if st.button("Refrescar", key="btn_salud_refresh", use_container_width=True):
+            st.rerun()
+    with col_dias:
+        dias_est = st.number_input("Dias para marcar estancado", min_value=1, max_value=15, value=2, key="salud_dias_est")
+
+    try:
+        diag = operations.diagnostico_salud(dias_estancado=int(dias_est))
+    except Exception as e:
+        st.error(f"Error cargando diagnostico: {e}")
+        diag = None
+
+    if diag:
+        # --- KPIs ---
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Total pedidos", diag["total_pedidos"])
+        k2.metric("Estancados", len(diag["estancados"]),
+                  delta=None if not diag["estancados"] else "accion", delta_color="inverse")
+        k3.metric("Huerfanos PAGADO", len(diag["huerfanos"]),
+                  delta=None if not diag["huerfanos"] else "accion", delta_color="inverse")
+        k4.metric("PAGOS sin pedido", len(diag["pagos_sin_pedido"]),
+                  delta=None if not diag["pagos_sin_pedido"] else "accion", delta_color="inverse")
+        k5.metric("Sin codigo", len(diag["pendientes_sin_codigo"]),
+                  delta=None if not diag["pendientes_sin_codigo"] else "accion", delta_color="inverse")
+
+        # --- Totales por estado ---
+        if diag["totales_por_estado"]:
+            partes = [f"**{k}**: {v}" for k, v in sorted(diag["totales_por_estado"].items(), key=lambda x: -x[1])]
+            st.caption(" · ".join(partes))
+
+        st.markdown("---")
+
+        # --- Estancados ---
+        if diag["estancados"]:
+            with st.expander(f"🕰 Estancados ({len(diag['estancados'])}) — pedidos PENDIENTE con ≥{dias_est} dias", expanded=True):
+                import pandas as pd
+                df_e = pd.DataFrame(diag["estancados"])
+                st.dataframe(df_e[["numero", "fecha", "dias", "direccion", "cliente", "codigo"]],
+                             use_container_width=True, hide_index=True)
+
+        # --- Huerfanos ---
+        if diag["huerfanos"]:
+            with st.expander(f"💸 Huerfanos ({len(diag['huerfanos'])}) — marcados PAGADO sin fila en PAGOS", expanded=False):
+                import pandas as pd
+                df_h = pd.DataFrame(diag["huerfanos"])
+                st.dataframe(df_h[["numero", "fecha", "cliente", "forma_pago", "monto"]],
+                             use_container_width=True, hide_index=True)
+                st.caption("_Pueden ser ingresos manuales legitimos (efectivo anotado a mano) o errores — revisar._")
+
+        # --- Pagos sin pedido ---
+        if diag["pagos_sin_pedido"]:
+            with st.expander(f"❓ PAGOS sin pedido ({len(diag['pagos_sin_pedido'])}) — pedido# inexistente en OPERACION DIARIA", expanded=False):
+                import pandas as pd
+                df_p = pd.DataFrame(diag["pagos_sin_pedido"])
+                st.dataframe(df_p[["pedido_num", "fecha", "monto", "cliente"]],
+                             use_container_width=True, hide_index=True)
+                st.caption("_Pedido# mal escrito al crear la fila en PAGOS._")
+
+        # --- Pendientes sin codigo ---
+        if diag["pendientes_sin_codigo"]:
+            with st.expander(f"🔖 Pendientes sin codigo driv.in ({len(diag['pendientes_sin_codigo'])})", expanded=False):
+                import pandas as pd
+                df_s = pd.DataFrame(diag["pendientes_sin_codigo"])
+                st.dataframe(df_s[["numero", "fecha", "direccion", "comuna"]],
+                             use_container_width=True, hide_index=True)
+                st.caption("_Asignar codigo desde la pestaña Reporte o ejecutar la rutina._")
+
+        if not any([diag["estancados"], diag["huerfanos"], diag["pagos_sin_pedido"], diag["pendientes_sin_codigo"]]):
+            st.success("Todo al dia — sin acciones pendientes.")
+
+        st.markdown("---")
+
+        # --- APIs externas (bajo demanda, costosas) ---
+        st.markdown("##### Revisiones con APIs externas")
+        st.caption("Bsale, driv.in y Gmail — se consultan bajo demanda porque son lentas.")
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            if st.button("Bsale: pedidos sin planilla", key="btn_bsale_pend", use_container_width=True):
+                with st.spinner("Consultando Bsale..."):
+                    try:
+                        pend = operations.check_bsale_pendientes()
+                        st.session_state["_bsale_pend"] = pend
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+            pend = st.session_state.get("_bsale_pend", None)
+            if pend is not None:
+                if pend:
+                    st.warning(f"{len(pend)} pedido(s) Bsale sin pasar a planilla")
+                    import pandas as pd
+                    st.dataframe(pd.DataFrame(pend)[["pedido_nro", "direccion", "comuna", "cantidad", "fecha"]],
+                                 use_container_width=True, hide_index=True)
+                else:
+                    st.success("Bsale al dia.")
+
+        with c2:
+            if st.button("driv.in: planes sin despachar", key="btn_drivin_pend", use_container_width=True):
+                with st.spinner("Consultando driv.in..."):
+                    try:
+                        hoy_str = datetime.now().strftime("%d/%m/%Y")
+                        v = operations.verify_orders_drivin(fecha=hoy_str, auto_update=False)
+                        st.session_state["_drivin_v"] = v
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+            v = st.session_state.get("_drivin_v", None)
+            if v is not None:
+                planes = v.get("planes_sin_despachar", [])
+                if planes:
+                    st.warning(f"{len(planes)} plan(es) sin despachar")
+                    import pandas as pd
+                    st.dataframe(pd.DataFrame(planes), use_container_width=True, hide_index=True)
+                else:
+                    st.success("Todos los planes iniciados.")
+
+with tab_lotes:
+    import pandas as pd
+    import frontend_helpers as fh
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
+
+    st.markdown("##### Carga rapida de pedidos")
+    st.caption("Pega desde Excel o escribe directo en la grilla. La IA detecta clientes existentes y auto-rellena codigo drivin al validar.")
+
+    if "clientes_cache" not in st.session_state:
+        try:
+            st.session_state.clientes_cache = sheets_client.get_clientes()
+        except Exception:
+            st.session_state.clientes_cache = []
+
+    # Esquema de columnas
+    col_defs = ["Cliente", "Direccion", "Depto", "Comuna", "Cant", "Marca", "Telefono", "Canal", "Doc", "Obs", "Codigo"]
+    blank_rows = 8
+
+    if "batch_df" not in st.session_state:
+        st.session_state.batch_df = pd.DataFrame(
+            [{c: "" for c in col_defs} for _ in range(blank_rows)]
+        )
+        for i in range(blank_rows):
+            st.session_state.batch_df.at[i, "Cant"] = "3"
+            st.session_state.batch_df.at[i, "Marca"] = "KOWEN"
+            st.session_state.batch_df.at[i, "Canal"] = "MANUAL"
+            st.session_state.batch_df.at[i, "Doc"] = "Boleta"
+
+    col_a, col_b, col_c = st.columns([1, 1, 1])
+    with col_a:
+        lotes_fecha = st.date_input("Fecha", value=datetime.now().date(), key="lotes_fecha")
+    with col_b:
+        if st.button("Agregar fila", use_container_width=True, key="btn_lotes_addrow"):
+            nueva = pd.DataFrame([{c: "" for c in col_defs}])
+            nueva.at[0, "Cant"] = "3"; nueva.at[0, "Marca"] = "KOWEN"
+            nueva.at[0, "Canal"] = "MANUAL"; nueva.at[0, "Doc"] = "Boleta"
+            st.session_state.batch_df = pd.concat([st.session_state.batch_df, nueva], ignore_index=True)
+            st.rerun()
+    with col_c:
+        if st.button("Vaciar", use_container_width=True, key="btn_lotes_clear"):
+            del st.session_state["batch_df"]
+            st.rerun()
+
+    gob = GridOptionsBuilder.from_dataframe(st.session_state.batch_df)
+    gob.configure_default_column(editable=True, resizable=True, filter=False, sortable=False)
+    gob.configure_column("Marca", cellEditor="agSelectCellEditor", cellEditorParams={"values": ["KOWEN", "CACTUS"]})
+    gob.configure_column("Canal", cellEditor="agSelectCellEditor", cellEditorParams={"values": ["MANUAL", "WSP", "EMAIL", "WEB"]})
+    gob.configure_column("Doc", cellEditor="agSelectCellEditor", cellEditorParams={"values": ["Boleta", "Factura", "Guia", "Ticket"]})
+    gob.configure_grid_options(stopEditingWhenCellsLoseFocus=True, enableRangeSelection=True)
+    grid_opts = gob.build()
+
+    grid_out = AgGrid(
+        st.session_state.batch_df,
+        gridOptions=grid_opts,
+        update_mode=GridUpdateMode.VALUE_CHANGED,
+        data_return_mode=DataReturnMode.AS_INPUT,
+        height=320,
+        theme="alpine-dark",
+        fit_columns_on_grid_load=True,
+        key="grid_lotes",
+    )
+    edited_df = pd.DataFrame(grid_out["data"]) if grid_out.get("data") is not None else st.session_state.batch_df
+
+    # --- Validar + preview ---
+    col_v, col_g = st.columns([1, 1])
+    with col_v:
+        validar = st.button("Validar", use_container_width=True, key="btn_lotes_validar")
+    with col_g:
+        guardar = st.button("Guardar pedidos", type="primary", use_container_width=True, key="btn_lotes_save")
+
+    if validar or guardar:
+        st.session_state.batch_df = edited_df
+        addr_cache = st.session_state.addresses_cache
+        filas_validas = []
+        errores = []
+        for i, row in edited_df.iterrows():
+            dir_r = str(row.get("Direccion", "")).strip()
+            cli_r = str(row.get("Cliente", "")).strip()
+            if not dir_r and not cli_r:
+                continue  # fila vacia, skip
+            if not dir_r:
+                errores.append(f"Fila {i+1}: falta direccion")
+                continue
+            # Match contra CLIENTES para auto-rellenar codigo/comuna si faltan
+            codigo = str(row.get("Codigo", "")).strip()
+            comuna = str(row.get("Comuna", "")).strip()
+            tel = str(row.get("Telefono", "")).strip()
+            if cli_r and (not codigo or not comuna or not tel):
+                for c in st.session_state.clientes_cache:
+                    if fh._norm(c.get("Nombre", "")) == fh._norm(cli_r):
+                        if not codigo: codigo = c.get("Codigo Drivin", "")
+                        if not comuna: comuna = c.get("Comuna", "")
+                        if not tel: tel = c.get("Telefono", "")
+                        break
+            try:
+                cant = int(str(row.get("Cant", "0") or "0"))
+            except ValueError:
+                cant = 0
+            filas_validas.append({
+                "fecha": lotes_fecha.strftime("%d/%m/%Y"),
+                "direccion": dir_r, "depto": str(row.get("Depto", "")).strip(),
+                "comuna": comuna, "codigo_drivin": codigo, "cant": cant,
+                "marca": str(row.get("Marca", "KOWEN")) or "KOWEN",
+                "documento": str(row.get("Doc", "Boleta")) or "Boleta",
+                "canal": str(row.get("Canal", "MANUAL")) or "MANUAL",
+                "cliente": cli_r, "telefono": tel,
+                "email": "", "observaciones": str(row.get("Obs", "")).strip(),
+                "estado_pedido": "PENDIENTE", "estado_pago": "PENDIENTE",
+            })
+
+        st.markdown(f"**{len(filas_validas)} fila(s) validas** · {len(errores)} con error")
+        for e in errores:
+            st.error(e)
+        if filas_validas:
+            st.dataframe(
+                pd.DataFrame([{
+                    "Cliente": p["cliente"], "Direccion": p["direccion"],
+                    "Comuna": p["comuna"], "Cant": p["cant"],
+                    "Marca": p["marca"], "Codigo": p["codigo_drivin"] or "—",
+                } for p in filas_validas]),
+                use_container_width=True, hide_index=True,
+            )
+
+        if guardar and filas_validas and not errores:
+            creados = 0
+            clientes_nuevos = 0
+            with st.spinner(f"Guardando {len(filas_validas)} pedidos..."):
+                for p in filas_validas:
+                    try:
+                        sheets_client.add_pedido(p)
+                        creados += 1
+                        if p["cliente"]:
+                            existing = sheets_client.find_cliente(p["cliente"])
+                            if not existing:
+                                sheets_client.add_cliente({
+                                    "nombre": p["cliente"], "telefono": p["telefono"],
+                                    "email": "", "direccion": p["direccion"],
+                                    "depto": p["depto"], "comuna": p["comuna"],
+                                    "codigo_drivin": p["codigo_drivin"], "marca": p["marca"],
+                                })
+                                clientes_nuevos += 1
+                    except Exception as ex:
+                        st.error(f"Error guardando {p['cliente']}: {ex}")
+            st.success(f"{creados} pedido(s) creados · {clientes_nuevos} cliente(s) nuevos")
+            st.session_state.pop("batch_df", None)
+            st.session_state.pop("clientes_cache", None)
+            st.rerun()
+
+with tab_rep:
+    import reports as _reports
+
+    st.markdown("""
+    <style>
+    .rep-hero-header { background: linear-gradient(180deg, rgba(127,29,29,0.18) 0%, transparent 100%);
+        border: 1px solid #7f1d1d; border-left: 4px solid #ef4444;
+        border-radius: 10px; padding: 14px 18px; margin-bottom: 12px; }
+    .rep-hero-header h3 { color: #fca5a5; margin: 0; font-size: 15px; font-weight: 700; }
+    .rep-hero-header .sub { color: #fca5a5; font-size: 13px; opacity: 0.9; }
+    .rep-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+        color: #888; padding: 14px 0 8px; margin-top: 6px; border-top: 1px dashed #ddd; }
+    .rep-section-title.critical { color: #ef4444; border-top-color: #fca5a5; }
+    .rep-atraso-3 { color: #ef4444; font-weight: 700; background: rgba(239,68,68,0.12);
+        padding: 2px 8px; border-radius: 3px; font-size: 11px; }
+    .rep-atraso-2 { color: #ef4444; font-weight: 700; font-size: 11px; }
+    .rep-atraso-1 { color: #f59e0b; font-weight: 700; font-size: 11px; }
+    .rep-atraso-0 { color: #888; font-size: 11px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # --- Controles ---
+    col_fecha, col_marca, col_space = st.columns([1, 1, 3])
+    with col_fecha:
+        rep_fecha = st.date_input("Fecha", value=datetime.now().date(), key="rep_fecha")
+    with col_marca:
+        rep_marca = st.selectbox("Marca", ["Todas", "Kowen", "Cactus"], key="rep_marca")
+
+    rep_fecha_str = rep_fecha.strftime("%d/%m/%Y")
+
+    # --- Cargar datos ---
+    try:
+        kpis = _reports.get_kpis(rep_fecha_str)
+        sin_cobrar = _reports.get_sin_cobrar(hoy=rep_fecha)
+        por_rep = _reports.get_entregas_por_repartidor(rep_fecha_str)
+    except Exception as e:
+        st.error(f"Error cargando reporte: {e}")
+        kpis = None
+        sin_cobrar = {"hoy": [], "ayer": [], "atrasados": []}
+        por_rep = []
+
+    # Filtrar por marca si aplica
+    def _marca_match(p):
+        if rep_marca == "Todas":
+            return True
+        return (p.get("Marca", "") or "").lower() == rep_marca.lower()
+
+    if rep_marca != "Todas":
+        sin_cobrar = {k: [p for p in v if _marca_match(p)] for k, v in sin_cobrar.items()}
+
+    # --- KPIs ---
+    if kpis:
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Pendientes", kpis["pendientes"], help="Aun no salen a reparto")
+        k2.metric("En camino", kpis["en_camino"])
+        k3.metric("Entregados", kpis["entregados"],
+                  delta=f"{round(kpis['entregados']/kpis['total']*100) if kpis['total'] else 0}%",
+                  delta_color="off")
+        k4.metric("Rechazados", kpis["rechazados"])
+        k5.metric("Botellones", kpis["botellones"],
+                  delta=f"K {kpis['kowen']} · C {kpis['cactus']}", delta_color="off")
+
+    # --- Panel Pedidos sin cobrar ---
+    total_sin_cobrar = sum(len(v) for v in sin_cobrar.values())
+    total_monto_sc = sum(p["monto_estimado"] for bucket in sin_cobrar.values() for p in bucket)
+
+    st.markdown(f"""
+    <div class="rep-hero-header">
+        <h3>● Pedidos sin cobrar <span style="color:white;">— llamar o visitar para cobrar</span></h3>
+        <div class="sub">{total_sin_cobrar} pedidos · ${total_monto_sc:,.0f} estimado</div>
+    </div>
+    """.replace(",", "."), unsafe_allow_html=True)
+
+    def _wa_link(telefono, cliente, pedido, monto):
+        import urllib.parse
+        tel = "".join(c for c in str(telefono or "") if c.isdigit())
+        if not tel:
+            return None
+        if not tel.startswith("56"):
+            tel = "56" + tel.lstrip("0")
+        msg = (f"Hola {cliente}, te escribimos de Kowen por el pedido #{pedido}. "
+               f"Quedo pendiente el cobro de ${monto:,.0f}. Gracias!").replace(",", ".")
+        return f"https://wa.me/{tel}?text={urllib.parse.quote(msg)}"
+
+    def _render_bucket(titulo, pedidos, critical=False, atraso_class="rep-atraso-0"):
+        if not pedidos:
+            return
+        css_cls = "rep-section-title critical" if critical else "rep-section-title"
+        st.markdown(f'<div class="{css_cls}">{titulo} ({len(pedidos)})</div>', unsafe_allow_html=True)
+        for p in pedidos:
+            direccion = p.get("Direccion", "")
+            if p.get("Depto"):
+                direccion += f", {p['Depto']}"
+            atraso_txt = "hoy" if p["atraso_dias"] == 0 else f"+{p['atraso_dias']} dia{'s' if p['atraso_dias'] > 1 else ''}"
+            atraso_cls = atraso_class
+            if p["atraso_dias"] >= 3:
+                atraso_cls = "rep-atraso-3"
+            elif p["atraso_dias"] == 2:
+                atraso_cls = "rep-atraso-2"
+            elif p["atraso_dias"] == 1:
+                atraso_cls = "rep-atraso-1"
+            cols = st.columns([0.7, 0.5, 1.8, 1.2, 2, 1, 1, 0.8, 1.4])
+            cols[0].markdown(f'<span class="{atraso_cls}">{atraso_txt}</span>', unsafe_allow_html=True)
+            cols[1].markdown(f"**#{p.get('#', '')}**")
+            marca_tag = " 🌵" if "cactus" in (p.get("Marca", "") or "").lower() else " 💧"
+            cols[2].markdown(f"**{p.get('Cliente', '') or '—'}**{marca_tag}")
+            cols[3].markdown(f"`{p.get('Telefono', '') or '—'}`")
+            cols[4].write(direccion or "—")
+            cols[5].write(p.get("Repartidor", "") or "—")
+            cols[6].write(p.get("Forma Pago", "") or "—")
+            cols[7].markdown(f"**${p['monto_estimado']:,.0f}**".replace(",", "."))
+            with cols[8]:
+                bc1, bc2 = st.columns(2)
+                if bc1.button("Cobrado", key=f"sc_cob_{p.get('#','')}", use_container_width=True):
+                    try:
+                        forma = (p.get("Forma Pago", "") or "Transferencia").strip() or "Transferencia"
+                        campo = "efectivo" if "efectivo" in forma.lower() else "transferencia"
+                        updates = {
+                            "estado_pago": "PAGADO",
+                            "fecha_pago": datetime.now().strftime("%d/%m/%Y"),
+                            campo: p["monto_estimado"],
+                        }
+                        sheets_client.update_pedido(p.get("#"), updates)
+                        st.success(f"Pedido #{p.get('#')} marcado como cobrado")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                wa = _wa_link(p.get("Telefono", ""), p.get("Cliente", ""), p.get("#", ""), p["monto_estimado"])
+                if wa:
+                    bc2.markdown(f'<a href="{wa}" target="_blank"><button style="width:100%;padding:4px 8px;font-size:11px;border:1px solid #ccc;background:white;border-radius:4px;cursor:pointer;">WhatsApp</button></a>', unsafe_allow_html=True)
+                else:
+                    bc2.write("—")
+
+    if total_sin_cobrar == 0:
+        st.success("No hay pedidos sin cobrar")
+    else:
+        _render_bucket("⚠ Atrasados", sin_cobrar["atrasados"], critical=True)
+        _render_bucket("Dia anterior", sin_cobrar["ayer"])
+        _render_bucket("Entregados hoy · aun sin pago", sin_cobrar["hoy"])
+
+    st.markdown("---")
+
+    # --- Entregas por repartidor + Pagos hoy ---
+    col_rep, col_pag = st.columns(2)
+
+    with col_rep:
+        st.markdown("##### Entregas por repartidor")
+        if por_rep:
+            display_rep = [
+                {
+                    "Repartidor": r["repartidor"],
+                    "Asignados": r["asignados"],
+                    "Entregados": r["entregados"],
+                    "Rechazados": r["rechazados"],
+                    "En ruta": r["en_ruta"],
+                    "% cumpl.": f"{r['pct_cumplimiento']}%",
+                }
+                for r in por_rep
+            ]
+            st.dataframe(display_rep, use_container_width=True, hide_index=True)
+        else:
+            st.info("Sin datos de repartidores para esta fecha")
+
+    with col_pag:
+        st.markdown("##### Pagos recibidos hoy")
+        try:
+            pagos_hoy = _reports.get_pagos_recibidos(rep_fecha_str)
+        except Exception as e:
+            st.error(f"Error leyendo pagos: {e}")
+            pagos_hoy = []
+        if pagos_hoy:
+            display_pag = [
+                {
+                    "Fecha": p.get("Fecha", ""),
+                    "Remitente": p.get("Remitente", "") or p.get("Cliente", ""),
+                    "Monto": p.get("Monto", ""),
+                    "Medio": p.get("Medio", ""),
+                    "Pedido": p.get("Pedido", "") or "—",
+                    "Estado": p.get("Match", "") or p.get("Estado", ""),
+                }
+                for p in pagos_hoy
+            ]
+            st.dataframe(display_pag, use_container_width=True, hide_index=True)
+        else:
+            st.info(f"Sin pagos registrados para {rep_fecha_str}")
+
 
 with tab_cl:
     clientes = sheets_client.get_clientes()
@@ -1524,86 +2027,170 @@ with tab_pg:
                     st.rerun()
 
 with tab_cr:
-    st.markdown("##### Procesar correos y conciliar pagos")
-    st.caption("Lee emails no leidos de copiacorreoskowen@gmail.com, clasifica y concilia pagos automaticamente.")
+    st.markdown("##### Pagos por confirmar")
+    st.caption("Lee correos no leidos, clasifica pagos y propone match con pedidos. Revisá y confirmá cada uno.")
 
-    cr_max = st.number_input("Max emails a procesar", min_value=1, max_value=100, value=30, key="cr_max")
-    cr_mark = st.checkbox("Marcar como leidos despues de procesar", value=False, key="cr_mark")
-
-    if st.button("Procesar correos ahora", type="primary", use_container_width=True, key="btn_correos"):
-        with st.spinner("Leyendo Gmail, clasificando y conciliando pagos..."):
-            try:
-                import payments
-                r = payments.procesar_emails_no_leidos(max_emails=cr_max, marcar_leidos=cr_mark)
-                st.session_state["_correos_result"] = r
-            except Exception as e:
-                st.error(f"Error: {e}")
+    c_btn, c_max = st.columns([3, 1])
+    with c_btn:
+        if st.button("🔄 Leer correos nuevos", type="primary", use_container_width=True, key="btn_correos"):
+            with st.spinner("Leyendo Gmail, clasificando..."):
+                try:
+                    import payments
+                    cr_max_val = st.session_state.get("cr_max", 30)
+                    r = payments.procesar_emails_no_leidos(max_emails=cr_max_val)
+                    st.session_state["_correos_result"] = r
+                except Exception as e:
+                    st.error(f"Error: {e}")
+    with c_max:
+        st.number_input("Max emails", min_value=1, max_value=100, value=30, key="cr_max", label_visibility="collapsed")
 
     res = st.session_state.get("_correos_result")
     if res:
+        por_confirmar = res.get("pagos_por_confirmar", [])
+        alertas = res.get("alertas", [])
+
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total", res.get("total", 0))
-        c2.metric("Conciliados", len(res.get("pagos_conciliados", [])))
-        c3.metric("Sugeridos", len(res.get("pagos_sugeridos", [])))
-        c4.metric("Sin match", len(res.get("pagos_sin_match", [])))
+        c1.metric("Leidos", res.get("total", 0))
+        c2.metric("Por confirmar", len(por_confirmar))
+        c3.metric("Duplicados", res.get("duplicados", 0))
+        c4.metric("Alertas", len(alertas))
 
         cats = res.get("por_categoria", {})
         if cats:
             st.caption("Por categoria: " + ", ".join(f"{k}={v}" for k, v in cats.items()))
 
-        conciliados = res.get("pagos_conciliados", [])
-        if conciliados:
-            st.success(f"{len(conciliados)} pagos conciliados automaticamente:")
-            st.dataframe(conciliados, use_container_width=True, hide_index=True)
+        st.markdown("---")
 
-        sugeridos = res.get("pagos_sugeridos", [])
-        if sugeridos:
-            st.warning(f"{len(sugeridos)} pagos con candidatos para revisar:")
-            for i, p in enumerate(sugeridos):
+        if not por_confirmar:
+            st.info("No hay pagos por confirmar.")
+        else:
+            import payments
+            import gmail_client
+            st.markdown(f"### {len(por_confirmar)} pago(s) por confirmar")
+            st.caption("Ordenados por score descendente. Los mas confiables arriba.")
+
+            for i, p in enumerate(por_confirmar):
                 pago = p["pago"]
-                with st.expander(
-                    f"{pago.get('remitente_nombre', '')} - ${pago.get('monto', '')} "
-                    f"({pago.get('fecha', '')})"
-                ):
-                    st.json(pago)
-                    st.markdown("**Candidatos:**")
-                    st.dataframe(p["candidatos"], use_container_width=True, hide_index=True)
-                    cand_labels = [
-                        f"#{c['numero']} {c['cliente']} {c['fecha']} ${c['monto']} (score {c['score']})"
-                        for c in p["candidatos"]
-                    ]
-                    sel = st.selectbox("Vincular a pedido", ["(ninguno)"] + cand_labels, key=f"sug_sel_{i}")
-                    if sel != "(ninguno)" and st.button("Aplicar match manual", key=f"sug_btn_{i}"):
-                        idx = cand_labels.index(sel)
-                        pedido_sel = p["candidatos"][idx]
-                        # Buscar pedido completo por numero
-                        pedidos = sheets_client.get_pedidos()
-                        pedido_full = next(
-                            (pp for pp in pedidos if pp.get("#") == pedido_sel["numero"]), None
+                candidatos = p["candidatos"]
+                top = candidatos[0] if candidatos else None
+                score_top = p["score_top"]
+                rut = pago.get("remitente_rut", "")
+
+                # Header con score
+                if score_top >= 80:
+                    badge = f"🟢 {score_top}%"
+                elif score_top >= 60:
+                    badge = f"🟡 {score_top}%"
+                elif score_top >= 40:
+                    badge = f"🟠 {score_top}%"
+                else:
+                    badge = "⚪ sin match"
+
+                header = (
+                    f"{badge} — **{pago.get('remitente_nombre', '(sin nombre)')}** "
+                    f"${pago.get('monto', '0')} · {pago.get('fecha', '')}"
+                )
+                if rut:
+                    header += f" · RUT {rut}"
+
+                with st.container(border=True):
+                    st.markdown(header)
+
+                    col_info, col_match = st.columns([1, 2])
+                    with col_info:
+                        st.caption(f"**Banco:** {pago.get('banco', '-')}")
+                        st.caption(f"**Medio:** {pago.get('medio', '-')}")
+                        st.caption(f"**Ref:** {pago.get('referencia', '-')}")
+                        if pago.get("glosa"):
+                            st.caption(f"**Glosa:** {pago.get('glosa', '')[:80]}")
+                        st.caption(f"**Asunto:** {p['email_subject'][:60]}")
+
+                    with col_match:
+                        if top:
+                            rut_tag = ""
+                            if top.get("rut_match") == 100:
+                                rut_tag = " ✅ RUT conocido"
+                            elif top.get("rut_match") == 0:
+                                rut_tag = " ⚠️ RUT apunta a otro cliente"
+                            st.markdown(
+                                f"**Match sugerido:** #{top['numero']} · {top['cliente']} · "
+                                f"{top['fecha']} · ${top['monto']}{rut_tag}"
+                            )
+                            if len(candidatos) > 1:
+                                st.caption(f"{len(candidatos) - 1} candidato(s) alternativo(s)")
+                        else:
+                            st.markdown("**Sin candidatos** — registrar como SIN_MATCH o rechazar")
+
+                    # Selector si hay alternativos
+                    pedido_elegido = top
+                    if len(candidatos) > 1:
+                        cand_labels = [
+                            f"#{c['numero']} · {c['cliente'][:30]} · {c['fecha']} · ${c['monto']} ({c['score']}%)"
+                            for c in candidatos
+                        ]
+                        sel_idx = st.selectbox(
+                            "Cambiar match",
+                            range(len(cand_labels)),
+                            format_func=lambda j: cand_labels[j],
+                            key=f"conf_sel_{i}",
                         )
-                        if pedido_full:
+                        pedido_elegido = candidatos[sel_idx]
+
+                    b1, b2, b3 = st.columns(3)
+                    with b1:
+                        if pedido_elegido and st.button(
+                            f"✅ Confirmar #{pedido_elegido['numero']}",
+                            key=f"conf_ok_{i}",
+                            type="primary",
+                            use_container_width=True,
+                        ):
                             try:
-                                import payments
-                                payments.aplicar_pago(pago, pedido_full, matched_auto=False)
-                                st.success(f"Pago vinculado a pedido #{pedido_sel['numero']}")
+                                pedidos_all = sheets_client.get_pedidos()
+                                pedido_full = next(
+                                    (pp for pp in pedidos_all if pp.get("#") == pedido_elegido["numero"]),
+                                    None,
+                                )
+                                if pedido_full:
+                                    payments.confirmar_pago(p["email_id"], pago, pedido_full)
+                                    st.success(
+                                        f"Pago vinculado a #{pedido_elegido['numero']} "
+                                        f"({pedido_full.get('Cliente', '')})"
+                                    )
+                                    # Quitar de la cola
+                                    st.session_state["_correos_result"]["pagos_por_confirmar"] = [
+                                        x for x in por_confirmar if x["email_id"] != p["email_id"]
+                                    ]
+                                    st.rerun()
+                                else:
+                                    st.error(f"No encontre el pedido #{pedido_elegido['numero']}")
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+                    with b2:
+                        if st.button("❌ Rechazar", key=f"conf_no_{i}", use_container_width=True):
+                            try:
+                                payments.rechazar_pago(p["email_id"], pago, razon="rechazado en dashboard")
+                                st.info("Registrado sin match y archivado.")
+                                st.session_state["_correos_result"]["pagos_por_confirmar"] = [
+                                    x for x in por_confirmar if x["email_id"] != p["email_id"]
+                                ]
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Error: {e}")
+                    with b3:
+                        if st.button("⏭️ Saltar", key=f"conf_skip_{i}", use_container_width=True):
+                            st.session_state["_correos_result"]["pagos_por_confirmar"] = [
+                                x for x in por_confirmar if x["email_id"] != p["email_id"]
+                            ]
+                            st.rerun()
 
-        sin_match = res.get("pagos_sin_match", [])
-        if sin_match:
-            st.error(f"{len(sin_match)} pagos sin match (revisar manualmente):")
-            for p in sin_match:
-                st.write(f"- {p['email_subject']} → ${p['pago'].get('monto', '')} "
-                         f"de {p['pago'].get('remitente_nombre', '')}")
-
-        alertas = res.get("alertas", [])
         if alertas:
-            st.info(f"{len(alertas)} alertas (pedidos/cotizaciones nuevos):")
+            st.markdown("---")
+            st.info(f"📬 {len(alertas)} correo(s) no-pago para revisar:")
             for a in alertas:
-                st.write(f"- [{a['categoria']}] {a['subject']} — {a['from']}")
+                st.write(f"- [{a['categoria']}] **{a['subject']}** — {a['from']}")
 
         if res.get("errores"):
+            st.markdown("---")
             st.error("Errores:")
             for e in res["errores"]:
                 st.write(f"- {e}")
@@ -1680,3 +2267,75 @@ with tab_sync:
                         st.error(f"Error: {e}")
         except Exception as e:
             st.error(f"Error: {e}")
+
+
+with tab_log:
+    st.markdown("##### Log de eventos del sistema")
+    st.caption("Rutinas, matches, correcciones, errores — escrito por el scheduler y el dashboard.")
+
+    import log_client as _log_client
+    from sheets_client import _read_sheet, TAB_LOG
+
+    col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
+    with col_f1:
+        tipo_filtro = st.selectbox(
+            "Tipo",
+            ["Todos", "RUTINA", "IMPORT", "MATCH", "ERROR", "CORRECCION", "DRIVIN"],
+            key="log_tipo",
+        )
+    with col_f2:
+        limite_dias = st.number_input("Ultimos N dias", min_value=1, max_value=30, value=7, key="log_dias")
+    with col_f3:
+        st.write("")  # spacer
+        if st.button("Refrescar", key="btn_log_refresh"):
+            st.rerun()
+
+    # --- Errores recurrentes ---
+    errores_rec = _log_client.get_errores_recurrentes(dias=int(limite_dias))
+    if errores_rec:
+        st.markdown("##### Errores recurrentes (>= 2 veces)")
+        for err in errores_rec:
+            with st.expander(
+                f"⚠ {err['accion']}: {err['conteo']} veces · ultimo {err['ultimo_error']}",
+            ):
+                st.code(err["ejemplo"][:500] or "(sin detalle)", language=None)
+    else:
+        st.info(f"Sin errores recurrentes en los ultimos {limite_dias} dias.")
+
+    st.markdown("---")
+
+    # --- Lista de eventos recientes ---
+    try:
+        rows = _read_sheet(TAB_LOG)
+    except Exception as e:
+        st.error(f"No se pudo leer la hoja LOG: {e}")
+        rows = []
+
+    if len(rows) >= 2:
+        import pandas as pd
+
+        headers = rows[0]
+        data_rows = rows[1:]
+        df = pd.DataFrame(data_rows, columns=headers[:len(data_rows[0])] if data_rows else headers)
+
+        # Filtrar por tipo
+        if tipo_filtro != "Todos" and "Tipo" in df.columns:
+            df = df[df["Tipo"] == tipo_filtro]
+
+        # Filtrar por fecha (ultimos N dias)
+        if "Fecha/Hora" in df.columns:
+            try:
+                df["_dt"] = pd.to_datetime(df["Fecha/Hora"], format="%d/%m/%Y %H:%M:%S", errors="coerce")
+                corte = datetime.now() - timedelta(days=int(limite_dias))
+                df = df[df["_dt"].notna() & (df["_dt"] >= corte)]
+                df = df.sort_values("_dt", ascending=False).drop(columns=["_dt"])
+            except Exception:
+                pass
+
+        st.markdown(f"##### Eventos ({len(df)})")
+        if len(df) == 0:
+            st.info("Sin eventos con esos filtros.")
+        else:
+            st.dataframe(df.head(200), use_container_width=True, hide_index=True)
+    else:
+        st.info("El log esta vacio.")

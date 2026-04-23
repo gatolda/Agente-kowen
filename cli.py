@@ -550,7 +550,7 @@ def procesar_correos():
     print("(La primera vez abre el navegador para login con copiacorreoskowen@gmail.com)\n")
 
     try:
-        r = payments.procesar_emails_no_leidos(max_emails=30, marcar_leidos=False)
+        r = payments.procesar_emails_no_leidos(max_emails=30)
     except Exception as e:
         print(f"Error: {e}")
         return
@@ -563,31 +563,26 @@ def procesar_correos():
         for k, v in cats.items():
             print(f"  {k}: {v}")
 
-    conciliados = r.get("pagos_conciliados", [])
-    if conciliados:
-        print(f"\nPagos conciliados automaticamente ({len(conciliados)}):")
-        for p in conciliados:
-            print(f"  - Pedido #{p['pedido']} {p['cliente']} | ${p['monto']} "
-                  f"(score: {p['score']})")
+    dup = r.get("duplicados", 0)
+    if dup:
+        print(f"\nDuplicados ignorados (ya en PAGOS): {dup}")
 
-    sugeridos = r.get("pagos_sugeridos", [])
-    if sugeridos:
-        print(f"\nPagos con candidatos para revisar ({len(sugeridos)}):")
-        for p in sugeridos:
+    por_confirmar = r.get("pagos_por_confirmar", [])
+    if por_confirmar:
+        print(f"\nPagos por confirmar ({len(por_confirmar)}):")
+        for p in por_confirmar:
             pago = p["pago"]
+            rut = pago.get("remitente_rut", "")
+            rut_str = f" RUT:{rut}" if rut else ""
             print(f"  - {pago.get('remitente_nombre', '')} ${pago.get('monto', '')} "
-                  f"({pago.get('fecha', '')})")
-            for c in p["candidatos"][:3]:
-                print(f"      #{c['numero']} {c['cliente'][:25]} "
-                      f"{c['fecha']} ${c['monto']} (score: {c['score']})")
-
-    sin_match = r.get("pagos_sin_match", [])
-    if sin_match:
-        print(f"\nPagos sin match ({len(sin_match)}):")
-        for p in sin_match:
-            pago = p["pago"]
-            print(f"  - {pago.get('remitente_nombre', '')} ${pago.get('monto', '')} "
-                  f"- {p['email_subject'][:40]}")
+                  f"({pago.get('fecha', '')}){rut_str}")
+            if p["candidatos"]:
+                for c in p["candidatos"][:3]:
+                    print(f"      #{c['numero']} {c['cliente'][:25]} "
+                          f"{c['fecha']} ${c['monto']} (score: {c['score']})")
+            else:
+                print("      (sin candidatos)")
+        print("\nConfirmar desde el dashboard Streamlit.")
 
     alertas = r.get("alertas", [])
     if alertas:

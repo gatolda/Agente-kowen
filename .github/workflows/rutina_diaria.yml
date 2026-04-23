@@ -2,9 +2,13 @@ name: Rutina Diaria Kowen
 
 on:
   schedule:
-    # 8:00 AM hora Chile (UTC-4 en invierno, UTC-3 en verano)
-    # Usamos 11:00 UTC = 8:00 AM Chile (horario invierno CLT)
-    - cron: '0 11 * * *'
+    # Corre 3 veces al dia (hora Chile CLT=UTC-4 en otono/invierno).
+    # 9:00 AM -> apertura + entregados de ayer
+    # 13:00   -> mitad de dia, clientes van llegando a planilla
+    # 17:00   -> corte oficial, ultimo barrido antes de cerrar
+    - cron: '0 13 * * *'
+    - cron: '0 17 * * *'
+    - cron: '0 21 * * *'
   workflow_dispatch:  # Permite ejecutar manualmente desde GitHub
 
 jobs:
@@ -30,4 +34,9 @@ jobs:
           BSALE_API_TOKEN: ${{ secrets.BSALE_API_TOKEN }}
           DRIVIN_API_KEY: ${{ secrets.DRIVIN_API_KEY }}
           GOOGLE_SHEETS_KOWEN_ID: ${{ secrets.GOOGLE_SHEETS_KOWEN_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_ENVIRONMENT: github-actions
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
         run: python scheduler.py

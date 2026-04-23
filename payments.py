@@ -2,19 +2,26 @@
 Modulo de pagos para Agente Kowen.
 - Lee emails de copiacorreoskowen@gmail.com
 - Clasifica con Claude (pagos/pedidos/cotizaciones/sii/servicios/spam)
-- Para emails de pago, extrae datos y hace match con pedidos de OPERACION DIARIA
-- Match: nombre → fecha → monto
+- Para emails de pago, extrae datos (incl. RUT) y propone match con pedidos
+- Todo match propuesto se confirma manualmente desde Streamlit
+- RUT memoria: una vez confirmado un RUT->Cliente, futuros pagos boostean ese match
 """
 
-from datetime import datetime, timedelta
+import json
+import logging
+import os
+from datetime import datetime
 from unidecode import unidecode
 
 import gmail_client
 import email_classifier
-from sheets_client import (
-    get_pedidos, update_pedido, add_pago, TAB_OPERACION, OP_COLS,
-    _read_sheet, _write_sheet, _retry, _get_service, SPREADSHEET_ID,
-)
+import sheets_client
+from sheets_client import get_pedidos, update_pedido, add_pago
+
+log = logging.getLogger("kowen.payments")
+
+
+RUT_MEMORY_FILE = os.path.join(os.path.dirname(__file__), "rut_memory.json")
 
 
 # ===== NORMALIZACION =====
@@ -24,11 +31,21 @@ def _normalize_name(s):
     if not s:
         return ""
     s = unidecode(s).lower().strip()
-    # Quitar puntuacion comun
     for ch in [".", ",", ";", ":", "(", ")", "\"", "'"]:
         s = s.replace(ch, " ")
-    # Colapsar espacios
     return " ".join(s.split())
+
+
+def _normalize_rut(s):
+    """
+    Normaliza un RUT chileno: solo digitos + verificador (K en mayuscula).
+    Ejemplos: '12.345.678-9' -> '123456789', '12345678-k' -> '12345678K'.
+    """
+    if not s:
+        return ""
+    s = str(s).upper().replace(".", "").replace("-", "").replace(" ", "")
+    # Dejar solo digitos y K
+    return "".join(c for c in s if c.isdigit() or c == "K")
 
 
 def _parse_fecha_dmy(s):
@@ -57,18 +74,54 @@ def _parse_monto(s):
     if not s:
         return 0
     s = str(s).replace("$", "").replace(".", "").replace(",", "").strip()
-    # Dejar solo digitos
     s = "".join(c for c in s if c.isdigit())
     return int(s) if s else 0
 
 
-# ===== SCORING DE MATCH =====
+def _fmt_fecha(s):
+    """Normaliza fecha a DD/MM/YYYY."""
+    dt = _parse_fecha_iso(s)
+    if dt:
+        return dt.strftime("%d/%m/%Y")
+    return s
+
+
+# ===== MEMORIA RUT -> CLIENTE =====
+
+def _load_rut_memory():
+    """Carga el diccionario {rut_normalizado: nombre_cliente}."""
+    if not os.path.exists(RUT_MEMORY_FILE):
+        return {}
+    try:
+        with open(RUT_MEMORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_rut_memory(memory):
+    """Guarda el diccionario RUT->Cliente."""
+    try:
+        with open(RUT_MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(memory, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def recordar_rut(rut, cliente):
+    """Guarda el mapeo rut_normalizado -> cliente en la memoria."""
+    rut_n = _normalize_rut(rut)
+    if not rut_n or not cliente:
+        return
+    memory = _load_rut_memory()
+    memory[rut_n] = cliente
+    _save_rut_memory(memory)
+
+
+# ===== SCORING =====
 
 def _score_name(name_pago, name_pedido):
-    """
-    Score de similaridad entre dos nombres (0-100).
-    Alto si tokens del nombre del pago aparecen en el pedido.
-    """
+    """Score 0-100 por similaridad de nombre (tokens en comun)."""
     np = _normalize_name(name_pago)
     pe = _normalize_name(name_pedido)
     if not np or not pe:
@@ -80,24 +133,14 @@ def _score_name(name_pago, name_pedido):
     if not tokens_pago or not tokens_ped:
         return 0
     common = tokens_pago & tokens_ped
-    # Ponderar por tokens en comun sobre el nombre mas corto
     min_tokens = min(len(tokens_pago), len(tokens_ped))
     if min_tokens == 0:
         return 0
-    ratio = len(common) / min_tokens
-    return int(ratio * 100)
+    return int(len(common) / min_tokens * 100)
 
 
 def _score_fecha(fecha_pago_dt, fecha_pedido_dt):
-    """
-    Score 0-100 segun cercania de fechas.
-    - Mismo dia: 100
-    - 1 dia: 90
-    - 2 dias: 70
-    - 3-5 dias: 50
-    - 6-14 dias: 20
-    - >14 dias: 0
-    """
+    """Score 0-100 segun cercania de fechas."""
     if not fecha_pago_dt or not fecha_pedido_dt:
         return 0
     dias = abs((fecha_pago_dt - fecha_pedido_dt).days)
@@ -115,18 +158,11 @@ def _score_fecha(fecha_pago_dt, fecha_pedido_dt):
 
 
 def _score_monto(monto_pago, monto_pedido):
-    """
-    Score 0-100 segun coincidencia de montos.
-    - Exacto: 100
-    - Dentro del 5%: 80
-    - Dentro del 10%: 50
-    - Mayor: 0
-    Si monto_pedido es 0 (no registrado), devuelve 50 (neutral).
-    """
+    """Score 0-100 segun coincidencia de montos."""
     if monto_pago <= 0:
         return 0
     if monto_pedido <= 0:
-        return 50  # No sabemos el monto del pedido
+        return 50
     if monto_pago == monto_pedido:
         return 100
     diff_pct = abs(monto_pago - monto_pedido) / max(monto_pago, monto_pedido)
@@ -137,49 +173,77 @@ def _score_monto(monto_pago, monto_pedido):
     return 0
 
 
-def _match_score(pago_data, pedido):
+def _score_rut(pago_rut, pedido_cliente, memory):
     """
-    Calcula score total (0-100) de match entre un pago y un pedido.
-    Peso: nombre 50%, fecha 30%, monto 20%.
+    Si el RUT esta en la memoria:
+    - apunta al mismo cliente (o tokens en comun): 100
+    - apunta a OTRO cliente: 0 (penaliza)
+    Si el RUT no esta en memoria: None (neutral, no cuenta).
     """
-    # Nombre
-    name_p = pago_data.get("remitente_nombre", "")
-    name_o = pedido.get("Cliente", "")
-    score_n = _score_name(name_p, name_o)
+    if not pago_rut:
+        return None
+    rut_n = _normalize_rut(pago_rut)
+    if not rut_n or rut_n not in memory:
+        return None
+    expected = _normalize_name(memory[rut_n])
+    actual = _normalize_name(pedido_cliente)
+    if not expected or not actual:
+        return None
+    if expected == actual:
+        return 100
+    tokens_e = set(expected.split())
+    tokens_a = set(actual.split())
+    return 100 if tokens_e & tokens_a else 0
 
-    # Fecha
-    fecha_p = _parse_fecha_iso(pago_data.get("fecha", ""))
-    fecha_o = _parse_fecha_dmy(pedido.get("Fecha", ""))
-    score_f = _score_fecha(fecha_p, fecha_o)
 
-    # Monto
-    monto_p = _parse_monto(pago_data.get("monto", ""))
-    monto_o = _parse_monto(pedido.get("Transferencia", ""))
-    score_m = _score_monto(monto_p, monto_o)
+def _match_score(pago_data, pedido, rut_memory):
+    """
+    Score total (0-100) de match entre pago y pedido.
+    Pesos adaptativos segun RUT:
+    - RUT conocido -> este cliente: RUT domina (55%), nombre 20%, fecha 15%, monto 10%
+    - RUT conocido -> otro cliente: penaliza (x0.5)
+    - RUT desconocido: nombre 50%, fecha 30%, monto 20% (pesos originales)
+    """
+    score_n = _score_name(pago_data.get("remitente_nombre", ""), pedido.get("Cliente", ""))
+    score_f = _score_fecha(
+        _parse_fecha_iso(pago_data.get("fecha", "")),
+        _parse_fecha_dmy(pedido.get("Fecha", "")),
+    )
+    score_m = _score_monto(
+        _parse_monto(pago_data.get("monto", "")),
+        _parse_monto(pedido.get("Transferencia", "")),
+    )
+    score_r = _score_rut(pago_data.get("remitente_rut", ""), pedido.get("Cliente", ""), rut_memory)
 
-    total = int(score_n * 0.5 + score_f * 0.3 + score_m * 0.2)
+    if score_r == 100:
+        total = int(score_r * 0.55 + score_n * 0.2 + score_f * 0.15 + score_m * 0.1)
+    elif score_r == 0:
+        total = int((score_n * 0.5 + score_f * 0.3 + score_m * 0.2) * 0.5)
+    else:
+        total = int(score_n * 0.5 + score_f * 0.3 + score_m * 0.2)
+
     return {
         "total": total,
         "nombre": score_n,
         "fecha": score_f,
         "monto": score_m,
+        "rut": score_r,
     }
 
 
-# ===== MATCHING PAGO -> PEDIDO =====
+# ===== MATCHING =====
 
-def match_pago_a_pedido(pago_data, pedidos=None, umbral_auto=75, umbral_sugerir=50):
+def match_pago_a_pedido(pago_data, pedidos=None, umbral_sugerir=40):
     """
-    Busca el pedido que mejor matchea con un pago.
+    Busca candidatos de pedidos para un pago.
 
     Args:
-        pago_data: Dict con remitente_nombre, fecha, monto.
-        pedidos: Lista de pedidos a considerar (default: todos pendientes de pago).
-        umbral_auto: Score minimo para auto-match.
-        umbral_sugerir: Score minimo para sugerir como candidato.
+        pago_data: Dict con remitente_nombre, remitente_rut, fecha, monto.
+        pedidos: Lista a considerar (default: todos no pagados).
+        umbral_sugerir: Score minimo para sugerir.
 
     Returns:
-        Dict con {match: pedido | None, candidatos: [(pedido, score)], auto: bool}.
+        Dict con {candidatos: [(pedido, score)], score_top}.
     """
     if pedidos is None:
         pedidos = [
@@ -187,40 +251,26 @@ def match_pago_a_pedido(pago_data, pedidos=None, umbral_auto=75, umbral_sugerir=
             if p.get("Estado Pago", "").upper() != "PAGADO"
         ]
 
+    memory = _load_rut_memory()
     scored = []
     for p in pedidos:
-        s = _match_score(pago_data, p)
+        s = _match_score(pago_data, p, memory)
         if s["total"] >= umbral_sugerir:
             scored.append((p, s))
-
     scored.sort(key=lambda x: x[1]["total"], reverse=True)
 
-    match = None
-    auto = False
-    if scored and scored[0][1]["total"] >= umbral_auto:
-        # Revisar que no haya empate con el segundo
-        if len(scored) == 1 or scored[0][1]["total"] - scored[1][1]["total"] >= 10:
-            match = scored[0][0]
-            auto = True
-
     return {
-        "match": match,
-        "score": scored[0][1] if scored else None,
         "candidatos": scored[:5],
-        "auto": auto,
+        "score_top": scored[0][1] if scored else None,
     }
 
 
-# ===== APLICAR MATCH EN SHEETS =====
+# ===== APLICAR =====
 
-def aplicar_pago(pago_data, pedido, matched_auto=True):
+def aplicar_pago(pago_data, pedido, email_id="", matched_auto=False):
     """
     Aplica el pago al pedido: marca PAGADO, registra datos y graba en hoja PAGOS.
-
-    Args:
-        pago_data: Dict con datos del pago.
-        pedido: Dict del pedido (de get_pedidos).
-        matched_auto: Si True, el match fue automatico.
+    Guarda la memoria RUT->Cliente si hay RUT en el pago.
     """
     numero = pedido.get("#", "")
     if not numero:
@@ -234,19 +284,16 @@ def aplicar_pago(pago_data, pedido, matched_auto=True):
         forma_pago = "Deposito"
 
     updates = {
-        "Estado Pago": "PAGADO",
-        "Forma Pago": forma_pago,
-        "Fecha Pago": _fmt_fecha(pago_data.get("fecha", "")),
+        "estado_pago": "PAGADO",
+        "forma_pago": forma_pago,
+        "fecha_pago": _fmt_fecha(pago_data.get("fecha", "")),
     }
     monto = _parse_monto(pago_data.get("monto", ""))
-    if monto > 0:
-        # Dejar el monto en Transferencia si esta vacio
-        if not pedido.get("Transferencia"):
-            updates["Transferencia"] = str(monto)
+    if monto > 0 and not pedido.get("Transferencia"):
+        updates["transferencia"] = str(monto)
 
     update_pedido(numero, updates)
 
-    # Registrar en hoja PAGOS
     add_pago({
         "fecha": _fmt_fecha(pago_data.get("fecha", "")),
         "monto": monto,
@@ -255,12 +302,20 @@ def aplicar_pago(pago_data, pedido, matched_auto=True):
         "pedido_vinculado": numero,
         "cliente": pago_data.get("remitente_nombre", "") or pedido.get("Cliente", ""),
         "estado": "CONCILIADO_AUTO" if matched_auto else "CONCILIADO_MANUAL",
+        "email_id": email_id,
     })
+
+    # Guardar memoria RUT -> Cliente del pedido (para futuras coincidencias)
+    rut = pago_data.get("remitente_rut", "")
+    cliente = pedido.get("Cliente", "")
+    if rut and cliente:
+        recordar_rut(rut, cliente)
+
     return True
 
 
-def registrar_pago_sin_match(pago_data, razon=""):
-    """Registra un pago en la hoja PAGOS sin vincularlo a pedido."""
+def registrar_pago_sin_match(pago_data, email_id="", razon=""):
+    """Registra un pago en PAGOS sin vincular a pedido."""
     add_pago({
         "fecha": _fmt_fecha(pago_data.get("fecha", "")),
         "monto": _parse_monto(pago_data.get("monto", "")),
@@ -269,42 +324,54 @@ def registrar_pago_sin_match(pago_data, razon=""):
         "pedido_vinculado": "",
         "cliente": pago_data.get("remitente_nombre", ""),
         "estado": f"SIN_MATCH ({razon})" if razon else "SIN_MATCH",
+        "email_id": email_id,
     })
 
 
-def _fmt_fecha(s):
-    """Normaliza fecha a DD/MM/YYYY."""
-    dt = _parse_fecha_iso(s)
-    if dt:
-        return dt.strftime("%d/%m/%Y")
-    return s
-
-
-# ===== FLUJO PRINCIPAL: PROCESAR EMAILS =====
-
-def procesar_emails_no_leidos(max_emails=30, marcar_leidos=False):
+def confirmar_pago(email_id, pago_data, pedido):
     """
-    Procesa emails no leidos:
-    - Clasifica cada uno
-    - Si es pago, extrae datos y busca match
-    - Aplica match automatico o lo deja como sugerencia
-    - Retorna resumen
+    Flujo de confirmacion desde Streamlit:
+    - Aplica pago al pedido
+    - Archiva email con etiqueta 'Conciliado'
+    - Guarda memoria RUT
+    """
+    aplicar_pago(pago_data, pedido, email_id=email_id, matched_auto=False)
+    if email_id:
+        try:
+            gmail_client.marcar_conciliado(email_id)
+        except Exception as e:
+            log.warning("Fallo marcar email %s como Conciliado: %s", email_id, e)
 
-    Args:
-        max_emails: Maximo de emails a procesar.
-        marcar_leidos: Si True, marca los emails procesados como leidos.
+
+def rechazar_pago(email_id, pago_data, razon="rechazado por usuario"):
+    """Registra el pago sin match y archiva el email."""
+    registrar_pago_sin_match(pago_data, email_id=email_id, razon=razon)
+    if email_id:
+        try:
+            gmail_client.marcar_conciliado(email_id)
+        except Exception as e:
+            log.warning("Fallo marcar email %s como Conciliado (rechazo): %s", email_id, e)
+
+
+# ===== FLUJO PRINCIPAL =====
+
+def procesar_emails_no_leidos(max_emails=30):
+    """
+    Lee emails no leidos, clasifica y extrae datos de pagos.
+    NO aplica pagos automaticamente: todo va a 'pagos_por_confirmar'.
+
+    Dedup: ignora emails cuyo id ya esta en PAGOS.Email ID.
 
     Returns:
-        Dict con resumen por categoria + lista de pagos procesados + alertas.
+        Dict con total, por_categoria, pagos_por_confirmar, alertas, errores, duplicados.
     """
     resumen = {
         "total": 0,
         "por_categoria": {},
-        "pagos_conciliados": [],
-        "pagos_sin_match": [],
-        "pagos_sugeridos": [],  # Requieren revision manual
-        "alertas": [],  # Emails de pedidos/cotizaciones/etc para revisar
+        "pagos_por_confirmar": [],  # Cola unica ordenada por score descendente
+        "alertas": [],
         "errores": [],
+        "duplicados": 0,
     }
 
     try:
@@ -314,6 +381,13 @@ def procesar_emails_no_leidos(max_emails=30, marcar_leidos=False):
         return resumen
 
     resumen["total"] = len(emails)
+
+    try:
+        ya_procesados = sheets_client.get_pago_email_ids()
+    except Exception as e:
+        resumen["errores"].append(f"No se pudo leer PAGOS para dedup: {e}")
+        ya_procesados = set()
+
     pedidos_pendientes = [
         p for p in get_pedidos()
         if p.get("Estado Pago", "").upper() != "PAGADO"
@@ -321,6 +395,10 @@ def procesar_emails_no_leidos(max_emails=30, marcar_leidos=False):
 
     for email in emails:
         try:
+            if email.get("id") in ya_procesados:
+                resumen["duplicados"] += 1
+                continue
+
             result = email_classifier.classify_and_extract(email)
             cat = result["categoria"]
             resumen["por_categoria"][cat] = resumen["por_categoria"].get(cat, 0) + 1
@@ -328,44 +406,26 @@ def procesar_emails_no_leidos(max_emails=30, marcar_leidos=False):
             if cat == "pagos":
                 pago_data = result.get("datos", {})
                 match_result = match_pago_a_pedido(pago_data, pedidos=pedidos_pendientes)
+                candidatos = match_result["candidatos"]
+                top = match_result["score_top"]
 
-                if match_result["auto"]:
-                    pedido = match_result["match"]
-                    aplicar_pago(pago_data, pedido, matched_auto=True)
-                    resumen["pagos_conciliados"].append({
-                        "email_id": email["id"],
-                        "email_subject": email.get("subject", ""),
-                        "remitente": pago_data.get("remitente_nombre", ""),
-                        "monto": pago_data.get("monto", ""),
-                        "pedido": pedido.get("#", ""),
-                        "cliente": pedido.get("Cliente", ""),
-                        "score": match_result["score"]["total"],
-                    })
-                    if marcar_leidos:
-                        gmail_client.mark_as_read(email["id"])
-                elif match_result["candidatos"]:
-                    resumen["pagos_sugeridos"].append({
-                        "email_id": email["id"],
-                        "email_subject": email.get("subject", ""),
-                        "pago": pago_data,
-                        "candidatos": [
-                            {
-                                "numero": p.get("#", ""),
-                                "cliente": p.get("Cliente", ""),
-                                "fecha": p.get("Fecha", ""),
-                                "monto": p.get("Transferencia", ""),
-                                "score": s["total"],
-                            }
-                            for p, s in match_result["candidatos"]
-                        ],
-                    })
-                else:
-                    registrar_pago_sin_match(pago_data, razon="ningun pedido match")
-                    resumen["pagos_sin_match"].append({
-                        "email_id": email["id"],
-                        "email_subject": email.get("subject", ""),
-                        "pago": pago_data,
-                    })
+                resumen["pagos_por_confirmar"].append({
+                    "email_id": email["id"],
+                    "email_subject": email.get("subject", ""),
+                    "pago": pago_data,
+                    "score_top": top["total"] if top else 0,
+                    "candidatos": [
+                        {
+                            "numero": p.get("#", ""),
+                            "cliente": p.get("Cliente", ""),
+                            "fecha": p.get("Fecha", ""),
+                            "monto": p.get("Transferencia", ""),
+                            "score": s["total"],
+                            "rut_match": s.get("rut"),
+                        }
+                        for p, s in candidatos
+                    ],
+                })
             elif cat in ("pedidos", "cotizaciones"):
                 resumen["alertas"].append({
                     "email_id": email["id"],
@@ -376,5 +436,8 @@ def procesar_emails_no_leidos(max_emails=30, marcar_leidos=False):
                 })
         except Exception as e:
             resumen["errores"].append(f"Error procesando {email.get('id', '?')}: {e}")
+
+    # Ordenar cola por score descendente (mas seguros arriba)
+    resumen["pagos_por_confirmar"].sort(key=lambda x: -x["score_top"])
 
     return resumen

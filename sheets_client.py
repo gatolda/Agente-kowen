@@ -4,6 +4,7 @@ Lee y escribe datos en la planilla "Pedidos 2026".
 Tabs: OPERACION DIARIA, CLIENTES, PAGOS, LOG.
 """
 
+import logging
 import os
 from datetime import datetime
 from google.oauth2.credentials import Credentials
@@ -11,14 +12,14 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
+from config import SPREADSHEET_ID, GOOGLE_SA_JSON
+
+log = logging.getLogger("kowen.sheets")
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-SPREADSHEET_ID = os.getenv(
-    "GOOGLE_SHEETS_KOWEN_ID",
-    "11cG1jArLtQrfmAqX-Qqsfx3Eqkns3Z80Ff9rCk2WwQU",
-)
 
 # Nombres de las hojas
 TAB_OPERACION = "OPERACION DIARIA"
@@ -59,10 +60,10 @@ def _get_service():
         creds = SACredentials.from_service_account_file(sa_file, scopes=SCOPES)
 
     # Modo 2: Service Account desde variable de entorno (GitHub Actions)
-    elif os.getenv("GOOGLE_SA_JSON"):
+    elif GOOGLE_SA_JSON:
         import json
         from google.oauth2.service_account import Credentials as SACredentials
-        sa_info = json.loads(os.getenv("GOOGLE_SA_JSON"))
+        sa_info = json.loads(GOOGLE_SA_JSON)
         creds = SACredentials.from_service_account_info(sa_info, scopes=SCOPES)
 
     # Modo 3: OAuth desktop flow (desarrollo local)
@@ -470,9 +471,9 @@ def add_cliente(cliente):
         cliente.get("codigo_drivin", ""),
         cliente.get("marca", "KOWEN"),
         str(cliente.get("precio_especial", "")),
-        "0",
-        "",
-        "Activo",
+        str(cliente.get("total_pedidos", 0)),
+        cliente.get("ultimo_pedido", ""),
+        cliente.get("estado", "Activo"),
     ]
     _append_sheet(TAB_CLIENTES, [row])
 
@@ -531,14 +532,39 @@ def get_pagos(fecha=None):
     return pagos
 
 
+_pagos_header_checked = False
+
+
+def _ensure_pagos_email_id_header():
+    """Garantiza que la hoja PAGOS tenga el header 'Email ID' en columna H."""
+    global _pagos_header_checked
+    if _pagos_header_checked:
+        return
+    try:
+        rows = _read_sheet(TAB_PAGOS, "!A1:H1")
+        header = rows[0] if rows else []
+        if len(header) < 8 or not header[7].strip():
+            service = _get_service()
+            service.spreadsheets().values().update(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f"'{TAB_PAGOS}'!H1",
+                valueInputOption="USER_ENTERED",
+                body={"values": [["Email ID"]]},
+            ).execute()
+    except Exception as e:
+        log.warning("No se pudo asegurar header 'Email ID' en PAGOS: %s", e)
+    _pagos_header_checked = True
+
+
 def add_pago(pago):
     """
     Registra un pago.
 
     Args:
         pago: Dict con campos: fecha, monto, medio, referencia,
-            pedido_vinculado, cliente, estado.
+            pedido_vinculado, cliente, estado, email_id.
     """
+    _ensure_pagos_email_id_header()
     row = [
         pago.get("fecha", datetime.now().strftime("%d/%m/%Y")),
         str(pago.get("monto", "")),
@@ -547,8 +573,27 @@ def add_pago(pago):
         str(pago.get("pedido_vinculado", "")),
         pago.get("cliente", ""),
         pago.get("estado", "PENDIENTE"),
+        pago.get("email_id", ""),
     ]
     _append_sheet(TAB_PAGOS, [row])
+
+
+def get_pago_email_ids():
+    """Devuelve el set de email_id ya registrados en PAGOS (para dedup)."""
+    rows = _read_sheet(TAB_PAGOS)
+    if len(rows) < 2:
+        return set()
+    headers = rows[0]
+    try:
+        idx = headers.index("Email ID")
+    except ValueError:
+        # Backfill: si la hoja aun no tiene columna, asumir ultima
+        idx = 7
+    ids = set()
+    for row in rows[1:]:
+        if idx < len(row) and row[idx].strip():
+            ids.add(row[idx].strip())
+    return ids
 
 
 # ===== LOG (helper usado por log_client.py) =====

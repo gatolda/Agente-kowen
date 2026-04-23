@@ -3,33 +3,75 @@ Cliente de driv.in API para Agente Kowen.
 Gestiona pedidos, rutas y entregas via API REST.
 """
 
-import os
+import logging
+import time
 import requests
+
+from config import DRIVIN_API_KEY
 
 BASE_URL = "https://external.driv.in/api/external/v2"
 TIMEOUT = 30  # segundos
+MAX_RETRIES = 3
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+log = logging.getLogger("kowen.drivin")
 
 
 def _get_headers():
     """Retorna headers de autenticacion."""
-    api_key = os.getenv("DRIVIN_API_KEY")
-    if not api_key:
+    if not DRIVIN_API_KEY:
         raise ValueError("DRIVIN_API_KEY no configurada en .env")
     return {
-        "X-API-Key": api_key,
+        "X-API-Key": DRIVIN_API_KEY,
         "Content-Type": "application/json",
     }
 
 
 def _request(method, endpoint, params=None, json_body=None):
-    """Ejecuta un request a la API de driv.in."""
+    """Ejecuta un request a la API de driv.in con retry + backoff exponencial."""
     url = f"{BASE_URL}/{endpoint}"
-    response = requests.request(
-        method, url, headers=_get_headers(), params=params, json=json_body,
-        timeout=TIMEOUT,
-    )
-    response.raise_for_status()
-    return response.json()
+    last_exc = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.request(
+                method, url, headers=_get_headers(), params=params,
+                json=json_body, timeout=TIMEOUT,
+            )
+            if response.status_code in RETRYABLE_STATUS and attempt < MAX_RETRIES - 1:
+                wait = 2 ** attempt
+                log.warning(
+                    "driv.in %s %s -> %d, reintentando en %ds (intento %d/%d)",
+                    method, endpoint, response.status_code, wait,
+                    attempt + 1, MAX_RETRIES,
+                )
+                time.sleep(wait)
+                continue
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.Timeout as e:
+            last_exc = e
+            if attempt < MAX_RETRIES - 1:
+                wait = 2 ** attempt
+                log.warning(
+                    "driv.in %s %s timeout, reintentando en %ds (intento %d/%d)",
+                    method, endpoint, wait, attempt + 1, MAX_RETRIES,
+                )
+                time.sleep(wait)
+                continue
+            raise
+        except requests.exceptions.ConnectionError as e:
+            last_exc = e
+            if attempt < MAX_RETRIES - 1:
+                wait = 2 ** attempt
+                log.warning(
+                    "driv.in %s %s connection error, reintentando en %ds (intento %d/%d)",
+                    method, endpoint, wait, attempt + 1, MAX_RETRIES,
+                )
+                time.sleep(wait)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
 
 
 # --- Schemas ---

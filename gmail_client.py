@@ -201,6 +201,28 @@ def get_or_create_label(name):
     return created["id"]
 
 
+def archivar(message_id):
+    """Archiva un mensaje (lo saca del inbox)."""
+    service = _get_service()
+    service.users().messages().modify(
+        userId="me", id=message_id,
+        body={"removeLabelIds": ["INBOX"]},
+    ).execute()
+
+
+def marcar_conciliado(message_id, label_name="Conciliado"):
+    """Aplica el label 'Conciliado' y archiva el mensaje."""
+    service = _get_service()
+    label_id = get_or_create_label(label_name)
+    service.users().messages().modify(
+        userId="me", id=message_id,
+        body={
+            "addLabelIds": [label_id],
+            "removeLabelIds": ["INBOX", "UNREAD"],
+        },
+    ).execute()
+
+
 def test_connection():
     """Prueba la conexion a Gmail."""
     try:

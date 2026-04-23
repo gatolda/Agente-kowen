@@ -19,9 +19,10 @@ import sys
 import time
 import logging
 from datetime import datetime
-from dotenv import load_dotenv
 
-load_dotenv()
+import config
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+import observability
 
 # --- Logging ---
 
@@ -50,9 +51,31 @@ INTERVALO_EMAILS = 30     # Minutos entre lecturas de Gmail
 DIAS_LABORALES = {0, 1, 2, 3, 4}  # Lunes=0 a Viernes=4
 
 
+# --- Dedup de alertas (evita spamear Telegram con la misma alerta) ---
+
+_alertas_enviadas = {
+    "fecha": None,
+    "huerfanos": set(),           # pedido# ya alertados como huerfanos
+    "sin_pedido": set(),          # keys de filas PAGOS sin pedido ya alertadas
+    "planes_sin_despachar": set(),  # nombres de plan ya alertados
+    "estancados": set(),          # pedido# ya alertados como estancados
+}
+
+
+def _reset_alertas_si_nuevo_dia():
+    """Limpia el set de alertas al cambiar de dia."""
+    hoy = config.now().date()
+    if _alertas_enviadas["fecha"] != hoy:
+        _alertas_enviadas["huerfanos"].clear()
+        _alertas_enviadas["sin_pedido"].clear()
+        _alertas_enviadas["planes_sin_despachar"].clear()
+        _alertas_enviadas["estancados"].clear()
+        _alertas_enviadas["fecha"] = hoy
+
+
 def es_horario_laboral():
     """Verifica si estamos en horario laboral."""
-    ahora = datetime.now()
+    ahora = config.now()
     return (ahora.weekday() in DIAS_LABORALES
             and HORA_INICIO <= ahora.hour < HORA_FIN)
 
@@ -61,17 +84,14 @@ def es_horario_laboral():
 
 def notificar(mensaje):
     """Envia notificacion por Telegram si esta configurado."""
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-    if not bot_token or not chat_id:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
     try:
         import requests
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         requests.post(url, json={
-            "chat_id": chat_id,
+            "chat_id": TELEGRAM_CHAT_ID,
             "text": mensaje,
             "parse_mode": "Markdown",
         }, timeout=10)
@@ -85,13 +105,15 @@ def ejecutar_rutina():
     """Ejecuta la rutina diaria completa."""
     import operations
 
-    hoy = datetime.now().strftime("%d/%m/%Y")
+    hoy = config.now().strftime("%d/%m/%Y")
     log.info(f"=== RUTINA DIARIA - {hoy} ===")
 
     try:
         resultado = operations.rutina_diaria(fecha_hoy=hoy)
     except Exception as e:
         log.error(f"Error critico en rutina diaria: {e}", exc_info=True)
+        observability.capture_exception(e)
+        observability.ping_healthcheck(fail=True, msg=f"rutina_diaria fallo: {e}")
         notificar(f"*Error en rutina diaria:*\n{e}")
         return None
 
@@ -140,6 +162,7 @@ def ejecutar_rutina():
         msg += "\n\n*Advertencias:*\n" + "\n".join(f"- {e}" for e in resultado["errores"])
 
     notificar(msg)
+    observability.ping_healthcheck(msg=f"rutina {hoy} ok")
     log.info("=== FIN RUTINA ===")
 
     return resultado
@@ -159,7 +182,7 @@ def importar_nuevos():
     """
     import operations
 
-    hoy = datetime.now().strftime("%d/%m/%Y")
+    hoy = config.now().strftime("%d/%m/%Y")
     total_importados = 0
 
     # Planilla Kowen
@@ -221,7 +244,8 @@ def verificar_estados():
     """Verifica estados de pedidos contra driv.in."""
     import operations
 
-    hoy = datetime.now().strftime("%d/%m/%Y")
+    _reset_alertas_si_nuevo_dia()
+    hoy = config.now().strftime("%d/%m/%Y")
 
     try:
         v = operations.verify_orders_drivin(fecha=hoy, auto_update=True)
@@ -243,74 +267,145 @@ def verificar_estados():
             msg += f"No entregados: {v['no_entregados_detectados']}\n"
         if v["en_camino_detectados"]:
             msg += f"En camino: {v['en_camino_detectados']}\n"
+        efectivo = v.get("efectivo_detectado", 0)
+        if efectivo:
+            msg += f"Efectivo (POD): {efectivo}\n"
         for d in v["detalle"][:5]:
             msg += f"  #{d['numero']} {d['direccion'][:25]}: {d['estado_nuevo']}\n"
         notificar(msg)
 
-    # Alertar pedidos estancados (solo una vez al dia, a las 10:00)
-    if datetime.now().hour == 10 and v["estancados"]:
-        msg = f"*{len(v['estancados'])} pedidos estancados:*\n"
-        for e in v["estancados"][:10]:
+    # Alertar pedidos estancados NUEVOS (no alertados hoy aun)
+    estancados_nuevos = [
+        e for e in v.get("estancados", [])
+        if str(e.get("numero", "")) not in _alertas_enviadas["estancados"]
+    ]
+    # Solo alertar a partir de las 10:00 para no molestar temprano
+    if config.now().hour >= 10 and estancados_nuevos:
+        msg = f"*{len(estancados_nuevos)} pedidos estancados nuevos:*\n"
+        for e in estancados_nuevos[:10]:
             msg += f"  #{e['numero']} {e['direccion'][:25]} ({e['dias']}d)\n"
         notificar(msg)
-        log.warning(f"{len(v['estancados'])} pedidos estancados detectados")
+        log.warning(f"{len(estancados_nuevos)} estancados nuevos detectados")
+        for e in estancados_nuevos:
+            _alertas_enviadas["estancados"].add(str(e.get("numero", "")))
+
+    # Alertar planes creados pero no despachados (cada plan solo una vez al dia)
+    planes_nuevos = [
+        p for p in v.get("planes_sin_despachar", [])
+        if p.get("plan", "") not in _alertas_enviadas["planes_sin_despachar"]
+    ]
+    if planes_nuevos:
+        msg = f"*{len(planes_nuevos)} plan(es) sin despachar:*\n"
+        for p in planes_nuevos[:5]:
+            msg += f"  {p['plan']} ({p.get('status', '')})\n"
+        msg += "\n_Revisar si falta iniciar rutas en driv.in._"
+        notificar(msg)
+        log.warning(f"{len(planes_nuevos)} planes sin despachar detectados")
+        for p in planes_nuevos:
+            _alertas_enviadas["planes_sin_despachar"].add(p.get("plan", ""))
 
     return v
 
 
 # --- Tarea 3.5: Procesar emails (cada 30 min) ---
 
+def _alertar_reconciliacion(rec):
+    """
+    Emite alertas Telegram sobre el resultado de reconciliar_pagos.
+    Usa dedup por dia para no spamear — cada huerfano/sin_pedido se alerta
+    solo la primera vez que se detecta en el dia.
+    """
+    huerfanos = rec.get("huerfanos", [])
+    sin_pedido = rec.get("sin_pedido", [])
+
+    # Huerfanos: pedidos marcados PAGADO sin fila en PAGOS (ingresos manuales sospechosos)
+    huerfanos_nuevos = [
+        h for h in huerfanos
+        if str(h.get("numero", "")) not in _alertas_enviadas["huerfanos"]
+    ]
+    if huerfanos_nuevos:
+        msg = f"*{len(huerfanos_nuevos)} pedido(s) PAGADO sin fila en PAGOS:*\n"
+        for h in huerfanos_nuevos[:10]:
+            cliente = (h.get("cliente", "") or "")[:25]
+            msg += (f"  #{h['numero']} {cliente} "
+                    f"({h.get('forma_pago', '') or 's/forma'} - {h.get('fecha', '')})\n")
+        msg += "\n_Revisar si son pagos validos o errores._"
+        notificar(msg)
+        for h in huerfanos_nuevos:
+            _alertas_enviadas["huerfanos"].add(str(h.get("numero", "")))
+
+    # Filas PAGOS con pedido# que no existe en OPERACION DIARIA
+    sin_pedido_keys = {
+        f"{s.get('pedido_num', '')}-{s.get('pago_fecha', '')}" for s in sin_pedido
+    }
+    sin_pedido_nuevos_keys = sin_pedido_keys - _alertas_enviadas["sin_pedido"]
+    if sin_pedido_nuevos_keys:
+        nuevos = [
+            s for s in sin_pedido
+            if f"{s.get('pedido_num', '')}-{s.get('pago_fecha', '')}" in sin_pedido_nuevos_keys
+        ]
+        msg = f"*{len(nuevos)} fila(s) PAGOS apuntan a pedido inexistente:*\n"
+        for s in nuevos[:10]:
+            msg += (f"  #{s['pedido_num']} ${s.get('pago_monto', '')} "
+                    f"({s.get('pago_fecha', '')})\n")
+        msg += "\n_Pedido# mal escrito en PAGOS._"
+        notificar(msg)
+        _alertas_enviadas["sin_pedido"].update(sin_pedido_nuevos_keys)
+
+
 def procesar_emails():
     """Lee emails no leidos, clasifica y concilia pagos."""
     import payments
+    import operations
+
+    _reset_alertas_si_nuevo_dia()
 
     try:
-        r = payments.procesar_emails_no_leidos(max_emails=30, marcar_leidos=False)
+        r = payments.procesar_emails_no_leidos(max_emails=30)
     except Exception as e:
         log.warning(f"Error procesando emails: {e}")
         return None
+
+    # Reconciliar PAGOS <-> OPERACION DIARIA por si hay confirmaciones manuales pendientes
+    try:
+        rec = operations.reconciliar_pagos()
+        if rec["actualizados"] > 0:
+            log.info(f"Reconciliacion pagos: {rec['actualizados']} pedidos actualizados")
+        _alertar_reconciliacion(rec)
+    except Exception as e:
+        log.warning(f"Error reconciliando pagos: {e}")
 
     if r["total"] == 0:
         return r
 
     cats = r.get("por_categoria", {})
-    conciliados = r.get("pagos_conciliados", [])
-    sugeridos = r.get("pagos_sugeridos", [])
-    sin_match = r.get("pagos_sin_match", [])
+    por_confirmar = r.get("pagos_por_confirmar", [])
     alertas = r.get("alertas", [])
+    dup = r.get("duplicados", 0)
 
     log.info(f"Emails: {r['total']} leidos | "
-             f"pagos auto: {len(conciliados)}, "
-             f"sugeridos: {len(sugeridos)}, "
-             f"sin match: {len(sin_match)}, "
+             f"por confirmar: {len(por_confirmar)}, "
+             f"duplicados: {dup}, "
              f"alertas: {len(alertas)}")
 
-    # Notificar solo si hay pagos conciliados o cosas para revisar
-    if conciliados or sugeridos or sin_match or alertas:
+    if por_confirmar or alertas:
         msg = "*Emails procesados*\n"
         resumen_cats = ", ".join(f"{k}:{v}" for k, v in cats.items())
         if resumen_cats:
             msg += f"\n{resumen_cats}\n"
 
-        if conciliados:
-            msg += f"\n*Pagos conciliados auto ({len(conciliados)}):*"
-            for p in conciliados[:5]:
-                msg += f"\n- #{p['pedido']} {p['cliente'][:25]} ${p['monto']}"
-
-        if sugeridos:
-            msg += f"\n\n*Pagos para revisar ({len(sugeridos)}):*"
-            for p in sugeridos[:5]:
+        if por_confirmar:
+            msg += f"\n*Pagos por confirmar ({len(por_confirmar)}):*"
+            for p in por_confirmar[:5]:
                 pago = p["pago"]
+                top = p["candidatos"][0] if p["candidatos"] else None
+                sugerencia = (
+                    f"-> #{top['numero']} {top['cliente'][:20]} ({top['score']}%)"
+                    if top else "(sin candidatos)"
+                )
                 msg += (f"\n- {pago.get('remitente_nombre', '')[:25]} "
-                        f"${pago.get('monto', '')} -> "
-                        f"{len(p['candidatos'])} candidatos")
-
-        if sin_match:
-            msg += f"\n\n*Pagos sin match ({len(sin_match)}):*"
-            for p in sin_match[:5]:
-                pago = p["pago"]
-                msg += (f"\n- {pago.get('remitente_nombre', '')[:25]} "
-                        f"${pago.get('monto', '')}")
+                        f"${pago.get('monto', '')} {sugerencia}")
+            msg += "\n\nConfirmar en el dashboard."
 
         if alertas:
             msg += f"\n\n*Alertas ({len(alertas)}):*"
@@ -328,7 +423,7 @@ def resumen_cierre():
     """Genera y envia resumen de cierre del dia."""
     import operations
 
-    hoy = datetime.now().strftime("%d/%m/%Y")
+    hoy = config.now().strftime("%d/%m/%Y")
 
     try:
         r = operations.resumen_dia(hoy)
@@ -377,7 +472,7 @@ def daemon():
     ultima_emails = None
 
     while True:
-        ahora = datetime.now()
+        ahora = config.now()
         hoy = ahora.date()
 
         # --- Rutina diaria (una vez al dia, a las 8:00+) ---
@@ -433,7 +528,7 @@ def mostrar_status():
     import operations
     import sheets_client
 
-    hoy = datetime.now().strftime("%d/%m/%Y")
+    hoy = config.now().strftime("%d/%m/%Y")
     print(f"\n=== Estado del sistema - {hoy} ===\n")
 
     pedidos = sheets_client.get_pedidos(hoy)
@@ -452,12 +547,13 @@ def mostrar_status():
     print(f"Entregados: {entregados} | Pendientes: {pendientes} | En camino: {en_camino}")
     print(f"Con codigo: {con_codigo} | Con plan: {con_plan}")
     print(f"\nHorario laboral: {'SI' if es_horario_laboral() else 'NO'}")
-    print(f"Hora actual: {datetime.now().strftime('%H:%M')}")
+    print(f"Hora actual: {config.now().strftime('%H:%M')}")
 
 
 # --- Entry point ---
 
 if __name__ == "__main__":
+    observability.init_sentry(component="scheduler")
     if "--daemon" in sys.argv:
         daemon()
     elif "--status" in sys.argv:

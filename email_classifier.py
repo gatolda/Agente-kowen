@@ -6,9 +6,10 @@ Para emails "pagos" ademas extrae: monto, banco, referencia, fecha, remitente.
 """
 
 import json
-import os
 import re
 from anthropic import Anthropic
+
+from config import ANTHROPIC_API_KEY
 
 MODEL = "claude-haiku-4-5-20251001"
 
@@ -21,10 +22,9 @@ def _get_client():
     global _client
     if _client:
         return _client
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
+    if not ANTHROPIC_API_KEY:
         raise ValueError("ANTHROPIC_API_KEY no configurada en .env")
-    _client = Anthropic(api_key=api_key)
+    _client = Anthropic(api_key=ANTHROPIC_API_KEY)
     return _client
 
 

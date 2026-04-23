@@ -6,8 +6,9 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import json
 
+from config import SPREADSHEET_ID
+
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_KOWEN_ID", "11cG1jArLtQrfmAqX-Qqsfx3Eqkns3Z80Ff9rCk2WwQU")
 
 def get_creds():
     creds = None
