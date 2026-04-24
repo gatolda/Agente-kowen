@@ -1415,35 +1415,78 @@ with tab_op:
                 return f"https://wa.me/{tel}?text={urllib.parse.quote(msg)}"
 
             for p in por_cobrar_pedidos:
-                col = st.columns([0.6, 2, 2.2, 1, 1, 0.9, 1.3])
+                col = st.columns([0.5, 1.8, 2, 0.9, 0.9, 1.4])
                 col[0].markdown(f"**#{p['numero']}**")
                 col[1].write(p["cliente"] or "—")
                 dir_p = p["direccion"] + (f", {p['depto']}" if p.get("depto") else "")
                 col[2].write(dir_p)
                 col[3].write(p["telefono"] or "—")
-                col[4].write(p.get("forma_pago") or "—")
-                col[5].markdown(f"**${p['monto']:,.0f}**".replace(",", "."))
-                with col[6]:
-                    bc1, bc2 = st.columns(2)
-                    if bc1.button("💵 Pagado", key=f"cob_{p['numero']}", use_container_width=True):
+                col[4].markdown(f"**${p['monto']:,.0f}**".replace(",", "."))
+                with col[5]:
+                    pop_cols = st.columns([2, 0.7])
+                    with pop_cols[0]:
                         try:
-                            forma = (p.get("forma_pago") or "Transferencia").strip() or "Transferencia"
-                            campo = "efectivo" if "efectivo" in forma.lower() else "transferencia"
-                            updates = {
-                                "estado_pago": "PAGADO",
-                                "fecha_pago": datetime.now().strftime("%d/%m/%Y"),
-                                campo: p["monto"],
-                            }
-                            sheets_client.update_pedido(p["numero"], updates)
-                            st.success(f"#{p['numero']} marcado pagado")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error: {e}")
-                    wa = _wa_link(p["telefono"], p["cliente"], p["numero"], p["monto"])
-                    if wa:
-                        bc2.markdown(
-                            f'<a href="{wa}" target="_blank"><button style="width:100%;padding:4px;font-size:11px;border:1px solid #ccc;background:white;border-radius:4px;">💬</button></a>',
-                            unsafe_allow_html=True)
+                            popover = st.popover("💵 Cobrar", use_container_width=True)
+                        except Exception:
+                            popover = st.expander("💵 Cobrar")
+                        with popover:
+                            default_medio = "Transferencia"
+                            if "efectivo" in (p.get("forma_pago") or "").lower():
+                                default_medio = "Efectivo"
+                            elif "webpay" in (p.get("forma_pago") or "").lower():
+                                default_medio = "Webpay"
+                            cob_monto = st.number_input(
+                                "Monto real",
+                                min_value=0,
+                                value=int(p["monto"] or 0),
+                                step=100,
+                                key=f"cm_{p['numero']}",
+                                help="Monto real cobrado (no el estimado)",
+                            )
+                            cob_medio = st.selectbox(
+                                "Medio de pago",
+                                ["Transferencia", "Efectivo", "Webpay"],
+                                index=["Transferencia", "Efectivo", "Webpay"].index(default_medio),
+                                key=f"cmd_{p['numero']}",
+                            )
+                            cob_ref = st.text_input(
+                                "Referencia",
+                                placeholder="wsp, nro op, etc.",
+                                key=f"cr_{p['numero']}",
+                            )
+                            if st.button("✓ Confirmar cobro",
+                                         key=f"cc_{p['numero']}",
+                                         type="primary",
+                                         use_container_width=True,
+                                         disabled=cob_monto <= 0):
+                                try:
+                                    fecha_cobro = datetime.now().strftime("%d/%m/%Y")
+                                    campo = "efectivo" if cob_medio == "Efectivo" else "transferencia"
+                                    sheets_client.update_pedido(p["numero"], {
+                                        "estado_pago": "PAGADO",
+                                        "fecha_pago": fecha_cobro,
+                                        "forma_pago": cob_medio,
+                                        campo: cob_monto,
+                                    })
+                                    sheets_client.add_pago({
+                                        "fecha": fecha_cobro,
+                                        "monto": cob_monto,
+                                        "medio": cob_medio,
+                                        "referencia": cob_ref,
+                                        "cliente": p.get("cliente", ""),
+                                        "pedido_vinculado": str(p["numero"]),
+                                        "estado": "PAGADO",
+                                    })
+                                    st.success(f"#{p['numero']} cobrado · ${cob_monto:,.0f}".replace(",", "."))
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error: {e}")
+                    with pop_cols[1]:
+                        wa = _wa_link(p["telefono"], p["cliente"], p["numero"], p["monto"])
+                        if wa:
+                            st.markdown(
+                                f'<a href="{wa}" target="_blank"><button style="width:100%;padding:7px;font-size:13px;border:1px solid #ccc;background:white;border-radius:4px;cursor:pointer;">💬</button></a>',
+                                unsafe_allow_html=True)
         else:
             st.success("Nadie con deuda pendiente hoy.")
 
