@@ -1257,10 +1257,22 @@ with tab_op:
             "NO ENTREGADO."
         )
 
+        modo_estricto = st.checkbox(
+            "🔥 Modo estricto — borrar TODO lo que no esté en drivin por código (también ENTREGADO/PAGADO)",
+            value=False,
+            key="sync_modo_estricto",
+            help="Útil cuando el verify marcó falsamente pedidos viejos como ENTREGADO por match por dirección. "
+                 "En modo estricto solo sobreviven los pedidos con código drivin que aparece en el scenario del día.",
+        )
+
         if st.button("🔍 Simular sincronización (dry-run)", key="btn_sync_dryrun", use_container_width=True):
             with st.spinner("Consultando drivin y comparando con planilla..."):
                 try:
-                    plan = operations.sync_operacion_con_drivin(fecha=op_fecha_str, dry_run=True)
+                    plan = operations.sync_operacion_con_drivin(
+                        fecha=op_fecha_str, dry_run=True,
+                        modo_estricto=modo_estricto,
+                    )
+                    plan["_modo_estricto"] = modo_estricto
                     st.session_state["_sync_plan"] = plan
                 except Exception as e:
                     st.error(f"Error: {e}")
@@ -1354,6 +1366,7 @@ with tab_op:
                             fecha=op_fecha_str,
                             dry_run=False,
                             reprogramar_a_manana=reprogramar,
+                            modo_estricto=plan.get("_modo_estricto", False),
                         )
                         msg_parts = [f"✓ Borrados: **{r['borrados_ok']}**"]
                         if r.get("reprogramados_ok"):

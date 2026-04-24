@@ -587,7 +587,8 @@ def importar_bsale_a_operacion(pedido_bsale, codigo_drivin, fecha_destino=None,
     }
 
 
-def sync_operacion_con_drivin(fecha=None, dry_run=True, reprogramar_a_manana=None):
+def sync_operacion_con_drivin(fecha=None, dry_run=True, reprogramar_a_manana=None,
+                                modo_estricto=False):
     """
     Sincroniza OPERACION DIARIA con el scenario drivin de la fecha (Opcion C).
 
@@ -655,15 +656,25 @@ def sync_operacion_con_drivin(fecha=None, dry_run=True, reprogramar_a_manana=Non
         estado = (p.get("Estado Pedido", "") or "").upper().strip()
         pago = (p.get("Estado Pago", "") or "").upper().strip()
         codigo = (p.get("Codigo Drivin", "") or "").strip()
+        esta_en_drivin = bool(codigo and codigo in drivin_codes)
 
-        # Preservar cualquier estado distinto a PENDIENTE (historico)
+        if modo_estricto:
+            # Estricto: preservar SOLO si esta en drivin. Los ENTREGADO/PAGADO
+            # sin match se borran (probablemente falsos positivos del verify).
+            if esta_en_drivin:
+                a_preservar.append(p)
+                planilla_codes.add(codigo)
+            else:
+                a_borrar.append(p)
+            continue
+
+        # Normal: preservar cualquier estado distinto a PENDIENTE (historico)
         if estado and estado != "PENDIENTE":
             a_preservar.append(p)
             if codigo:
                 planilla_codes.add(codigo)
             continue
 
-        # Preservar si esta pagado aunque sea pendiente
         if pago == "PAGADO":
             a_preservar.append(p)
             if codigo:
@@ -671,7 +682,7 @@ def sync_operacion_con_drivin(fecha=None, dry_run=True, reprogramar_a_manana=Non
             continue
 
         # PENDIENTE + no PAGADO: comparar con drivin
-        if codigo and codigo in drivin_codes:
+        if esta_en_drivin:
             a_preservar.append(p)
             planilla_codes.add(codigo)
         else:
