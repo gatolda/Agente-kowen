@@ -972,6 +972,43 @@ with tab_op:
             )
             st.markdown(table_html, unsafe_allow_html=True)
 
+            # --- Eliminar pedido manualmente ---
+            st.markdown("")
+            with st.expander("🗑 Eliminar pedido individual", expanded=False):
+                numeros = [str(p.get("numero", "")) for p in pedidos_ruta if p.get("numero")]
+                if not numeros:
+                    st.info("Sin pedidos para eliminar.")
+                else:
+                    ec1, ec2, ec3 = st.columns([2, 2, 1])
+                    with ec1:
+                        nro_sel = st.selectbox(
+                            "Elegí el pedido a eliminar",
+                            options=numeros,
+                            format_func=lambda n: next(
+                                (f"#{n} — {p.get('cliente','')[:25] or '—'} · "
+                                 f"{p.get('direccion','')[:30]}"
+                                 for p in pedidos_ruta if str(p.get("numero","")) == n),
+                                f"#{n}"
+                            ),
+                            key="op_del_select",
+                        )
+                    with ec2:
+                        confirm = st.checkbox(
+                            "Confirmo que quiero eliminar este pedido",
+                            key="op_del_confirm",
+                        )
+                    with ec3:
+                        st.write("")
+                        if st.button("🗑 Eliminar", key="op_del_btn",
+                                     disabled=not confirm, type="primary",
+                                     use_container_width=True):
+                            try:
+                                sheets_client.delete_pedido(int(nro_sel))
+                                st.success(f"Pedido #{nro_sel} eliminado")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+
     # ------------ SUB-TAB PLAN DRIV.IN ------------
     with sub_plan:
         if scenario.get("existe"):
@@ -1081,14 +1118,34 @@ with tab_op:
 
             if dp['sin_match_pendientes']:
                 with st.expander(f"🗑 Ver los {smp} pendientes sin match en planilla", expanded=False):
-                    df_smp = pd.DataFrame([
-                        {"#": p.get("#",""), "Cliente": p.get("Cliente","") or "—",
-                         "Dirección": p.get("Direccion",""), "Comuna": p.get("Comuna",""),
-                         "Cant": p.get("Cant",""), "Marca": p.get("Marca",""),
-                         "Canal": p.get("Canal",""), "Código": p.get("Codigo Drivin","") or "—"}
-                        for p in dp['sin_match_pendientes']
-                    ])
-                    st.dataframe(df_smp, use_container_width=True, hide_index=True)
+                    st.caption("Cada uno tiene un botón 🗑 para eliminarlo individualmente.")
+                    # Header
+                    hc = st.columns([0.6, 1.8, 2.2, 1.2, 0.5, 0.9, 1, 0.7])
+                    for col, titulo in zip(hc, ["#", "Cliente", "Dirección", "Comuna", "Cant", "Marca", "Canal", ""]):
+                        col.caption(f"**{titulo}**")
+                    for p in dp['sin_match_pendientes']:
+                        nro_str = str(p.get("#","")).strip()
+                        cols = st.columns([0.6, 1.8, 2.2, 1.2, 0.5, 0.9, 1, 0.7])
+                        cols[0].markdown(f"`#{nro_str}`")
+                        cols[1].write(p.get("Cliente","") or "—")
+                        cols[2].write(p.get("Direccion",""))
+                        cols[3].write(p.get("Comuna",""))
+                        cols[4].write(p.get("Cant",""))
+                        cols[5].write(p.get("Marca",""))
+                        cols[6].write(p.get("Canal",""))
+                        with cols[7]:
+                            if st.button("🗑", key=f"del_smp_{nro_str}", help=f"Eliminar pedido #{nro_str}"):
+                                try:
+                                    sheets_client.delete_pedido(int(nro_str))
+                                    st.success(f"#{nro_str} eliminado")
+                                    # Actualizar el diagnostico en session
+                                    st.session_state["_diag_planillas"]["sin_match_pendientes"] = [
+                                        x for x in dp['sin_match_pendientes']
+                                        if str(x.get("#","")).strip() != nro_str
+                                    ]
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error: {e}")
 
             if dp['faltantes_kowen'] or dp['faltantes_cactus']:
                 with st.expander(f"➕ Ver {fk + fc} pedidos de planilla sin reflejo en OPERACION", expanded=False):
