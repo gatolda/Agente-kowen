@@ -1454,6 +1454,12 @@ with tab_op:
                                 placeholder="wsp, nro op, etc.",
                                 key=f"cr_{p['numero']}",
                             )
+                            cob_obs = st.text_input(
+                                "Observación adicional (opcional)",
+                                placeholder="Ej: CRÉDITO 1 bot a favor",
+                                key=f"co_{p['numero']}",
+                                help="Se agrega a las observaciones del pedido. Útil para dejar notas de crédito, retiros, etc.",
+                            )
                             if st.button("✓ Confirmar cobro",
                                          key=f"cc_{p['numero']}",
                                          type="primary",
@@ -1462,12 +1468,20 @@ with tab_op:
                                 try:
                                     fecha_cobro = datetime.now().strftime("%d/%m/%Y")
                                     campo = "efectivo" if cob_medio == "Efectivo" else "transferencia"
-                                    sheets_client.update_pedido(p["numero"], {
+                                    updates = {
                                         "estado_pago": "PAGADO",
                                         "fecha_pago": fecha_cobro,
                                         "forma_pago": cob_medio,
                                         campo: cob_monto,
-                                    })
+                                    }
+                                    # Concatenar observacion nueva a la existente
+                                    if cob_obs.strip():
+                                        obs_prev = (p.get("observaciones") or "").strip()
+                                        updates["observaciones"] = (
+                                            f"{obs_prev} | {cob_obs.strip()}" if obs_prev
+                                            else cob_obs.strip()
+                                        )
+                                    sheets_client.update_pedido(p["numero"], updates)
                                     sheets_client.add_pago({
                                         "fecha": fecha_cobro,
                                         "monto": cob_monto,
