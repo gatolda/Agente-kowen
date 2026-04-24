@@ -2630,9 +2630,15 @@ def rutina_diaria(fecha_hoy=None):
             update_pedidos_batch(updates)
             resultado["entregados_ayer"] = len(entregados)
 
-        # --- PASO 3: Marcar y mover no entregados ---
-        mover = no_entregados + pendientes_sin_pod
+        # --- PASO 3: Marcar y mover SOLO los rechazados (no_entregados) ---
+        # Regla de negocio: de ayer solo se arrastran a hoy los RECHAZADOS
+        # (POD status=rejected). Los desasignados se mueven manualmente con
+        # "Reprogramar a mañana" en el sync drivin. Los PENDIENTES sin POD
+        # quedan con fecha de ayer y estado PENDIENTE (residuales que no
+        # deben inflar el dia de hoy).
+        mover = no_entregados  # antes: no_entregados + pendientes_sin_pod
         resultado["no_entregados_ayer"] = len(no_entregados)
+        resultado["pendientes_sin_pod_ayer"] = len(pendientes_sin_pod)  # informativo
 
         if mover:
             updates = [(n, {
