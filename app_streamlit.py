@@ -1203,15 +1203,34 @@ with tab_op:
                         "Puede ser que se hayan subido a otro plan o que falte hacer el sync."
                     )
 
-        # Planes sin despachar (consulta bajo demanda)
+        # Verificar estados contra drivin (PODs)
         st.markdown("---")
-        if st.button("🔍 Verificar planes sin despachar en driv.in", key="btn_plan_chk", use_container_width=True):
-            with st.spinner("Consultando driv.in..."):
-                try:
-                    v = operations.verify_orders_drivin(fecha=op_fecha_str, auto_update=False)
-                    st.session_state["_drivin_v"] = v
-                except Exception as e:
-                    st.error(f"Error: {e}")
+        vcol1, vcol2 = st.columns(2)
+        with vcol1:
+            if st.button("🔄 Actualizar estados contra driv.in (AHORA)",
+                         key="btn_verify_now", type="primary", use_container_width=True,
+                         help="Consulta PODs de drivin y actualiza ENTREGADO/NO ENTREGADO en la planilla"):
+                with st.spinner("Consultando PODs de drivin y actualizando planilla..."):
+                    try:
+                        v = operations.verify_orders_drivin(fecha=op_fecha_str, auto_update=True)
+                        st.session_state["_drivin_v"] = v
+                        st.success(
+                            f"✓ Verificados: {v.get('total_verificados',0)}  ·  "
+                            f"Actualizados: **{v.get('actualizados',0)}**  ·  "
+                            f"Entregados detectados: **{v.get('entregados_detectados',0)}**"
+                        )
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+        with vcol2:
+            if st.button("🔍 Planes sin despachar en driv.in",
+                         key="btn_plan_chk", use_container_width=True):
+                with st.spinner("Consultando driv.in..."):
+                    try:
+                        v = operations.verify_orders_drivin(fecha=op_fecha_str, auto_update=False)
+                        st.session_state["_drivin_v"] = v
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
         v = st.session_state.get("_drivin_v", None)
         if v is not None:
             planes = v.get("planes_sin_despachar", [])
