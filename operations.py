@@ -2706,6 +2706,22 @@ def rutina_diaria(fecha_hoy=None):
                       if p.get("Codigo Drivin", "").strip()
                       and p.get("Estado Pedido") == "PENDIENTE"
                       and not p.get("Plan Drivin", "").strip()]
+        scenario_token = ""
+
+        # Si no hay pedidos nuevos a subir, igualmente intentar recuperar el
+        # scenario existente de hoy para que el PASO 7b pueda avanzarlo.
+        if not con_codigo:
+            parts_h = fecha_hoy.split("/")
+            api_date_tmp = f"{parts_h[2]}-{parts_h[1]}-{parts_h[0]}"
+            plan_name_tmp = f"{fecha_hoy}API"
+            try:
+                scenarios_tmp = drivin_client.get_scenarios_by_date(api_date_tmp).get("response", []) or []
+                for s in scenarios_tmp:
+                    if s.get("description") == plan_name_tmp:
+                        scenario_token = s.get("token", s.get("scenario_token", ""))
+                        break
+            except Exception:
+                pass
 
         if con_codigo:
             # Convertir fecha para API
