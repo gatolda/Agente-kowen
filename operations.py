@@ -2019,6 +2019,14 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
         if pod_fecha:
             pods_by_code_fecha[(addr_code, pod_fecha)] = pod
 
+    # Debug: resumen del estado del verify
+    log.info(
+        "verify: %d pedidos pendientes / %d PODs indexados en %d claves (code+fecha)",
+        len(pendientes), len(all_pods), len(pods_by_code_fecha),
+    )
+    _stats_debug = {"sin_codigo": 0, "con_codigo_sin_pod": 0,
+                    "con_codigo_sin_fecha": 0, "match": 0}
+
     estado_map = DRIVIN_STATUS_MAP
 
     updates = []
@@ -2042,30 +2050,33 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
         pod = None
         fecha_pedido_iso = ""
         if codigo and fecha_pedido:
-            # Convertir fecha del pedido DD/MM/YYYY -> YYYY-MM-DD
             try:
                 fp = fecha_pedido.split("/")
                 fecha_pedido_iso = f"{fp[2]}-{fp[1].zfill(2)}-{fp[0].zfill(2)}"
             except (IndexError, ValueError):
                 fecha_pedido_iso = ""
             if fecha_pedido_iso:
-                # Buscar POD cuya fecha sea >= fecha del pedido
                 for (c, f_pod), p_pod in pods_by_code_fecha.items():
                     if c == codigo and f_pod >= fecha_pedido_iso:
                         pod = p_pod
                         break
 
-        # Debug: si el pedido tiene código pero no encontró POD, loggear
-        if codigo and not pod:
-            # Buscar si el código está en algún POD (cualquier fecha)
+        # Debug counters
+        if not codigo:
+            _stats_debug["sin_codigo"] += 1
+        elif not fecha_pedido_iso:
+            _stats_debug["con_codigo_sin_fecha"] += 1
+        elif pod:
+            _stats_debug["match"] += 1
+        else:
+            _stats_debug["con_codigo_sin_pod"] += 1
             fechas_del_code = [
                 f for (c, f), _ in pods_by_code_fecha.items() if c == codigo
             ]
             if fechas_del_code:
                 log.info(
-                    "verify #%s code=%r: POD(s) existe(n) en fechas %s pero "
-                    "ninguna es >= fecha_pedido %s",
-                    nro_int, codigo, fechas_del_code, fecha_pedido_iso,
+                    "verify #%s code=%r fecha_pedido=%s: POD(s) en fechas %s",
+                    nro_int, codigo, fecha_pedido_iso, fechas_del_code,
                 )
 
         nuevo_estado = None
@@ -2179,6 +2190,15 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
         update_pedidos_batch(updates)
         resultado["actualizados"] = len(updates)
 
+    # Debug final: resumen de por qué matcheó o no
+    log.info(
+        "verify STATS: match=%d · sin_codigo=%d · con_codigo_sin_fecha=%d · "
+        "con_codigo_sin_POD=%d",
+        _stats_debug["match"],
+        _stats_debug["sin_codigo"],
+        _stats_debug["con_codigo_sin_fecha"],
+        _stats_debug["con_codigo_sin_pod"],
+    )
     return resultado
 
 
