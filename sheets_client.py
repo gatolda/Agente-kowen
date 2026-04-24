@@ -83,23 +83,29 @@ def _get_service():
     return _service
 
 
-def _retry(func, max_retries=4):
-    """Ejecuta una funcion con retry + backoff exponencial para manejar rate limits.
+def _retry(func, max_retries=6):
+    """Ejecuta una funcion con retry + backoff para manejar rate limits Sheets.
+
+    Sheets tiene limite de 60 reads/min; si se pasa, devuelve 429 y el quota
+    se resetea al comenzar el siguiente minuto. Por eso el backoff escala
+    hasta superar 60s en el ultimo intento.
 
     Detecta rate limits/errores transitorios por:
     - HttpError.resp.status en [429, 500, 502, 503, 504]
-    - Strings "429", "500", "503", "RATE_LIMIT", "Quota exceeded" en el mensaje
+    - Strings "429", "500", "503", "RATE_LIMIT", "Quota exceeded" en mensaje
+
+    Total peor caso: 5+15+30+60+90 = 200s (~3.3 min).
     """
     import time
     _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
     _RETRYABLE_STRS = ("429", "500", "502", "503", "504", "RATE_LIMIT",
                        "Quota exceeded", "backend error")
+    _WAITS = [5, 15, 30, 60, 90]  # segundos entre reintentos
     for attempt in range(max_retries):
         try:
             return func()
         except Exception as e:
             is_retryable = False
-            # Chequeo por status code HTTP (googleapiclient.errors.HttpError)
             status = getattr(getattr(e, "resp", None), "status", None)
             if status in _RETRYABLE_STATUS:
                 is_retryable = True
@@ -109,7 +115,7 @@ def _retry(func, max_retries=4):
                     is_retryable = True
 
             if is_retryable and attempt < max_retries - 1:
-                wait = 2 ** attempt  # 1s, 2s, 4s, 8s
+                wait = _WAITS[min(attempt, len(_WAITS) - 1)]
                 time.sleep(wait)
                 continue
             raise
