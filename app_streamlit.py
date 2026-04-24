@@ -202,15 +202,47 @@ st.markdown("""
 
 
 # --- Estado de sesion ---
+# Centralizacion: todas las keys conocidas se inicializan una vez con default,
+# en vez de inicializarlas caso por caso en cada tab. Previene errores cuando
+# el user accede a un sub-tab antes que pasar por el que inicializaba la key.
 
-if "addresses_cache" not in st.session_state:
+def _init_session_state():
+    defaults = {
+        # Core
+        "addresses_cache": None,  # se llena abajo con address_matcher.load_cache()
+        "scenario_token": None,
+        "scenario_name": None,
+        "chat_messages": [],
+        # Caches temporales de UI
+        "clientes_cache": None,
+        "nuevo_pedido_data": {
+            "cliente": "", "telefono": "", "email": "",
+            "direccion": "", "depto": "", "comuna": "",
+            "codigo_drivin": "", "marca": "KOWEN",
+        },
+        "last_selected_key": None,
+        "batch_df": None,
+        # Resultados de acciones del dashboard (cachean entre reruns)
+        "bsale_checked": None,
+        "bsale_matched": None,
+        "_bsale_pend": None,
+        "_drivin_v": None,
+        "_drivin_addr_options": None,
+        "_sync_plan": None,
+        "_diag_planillas": None,
+        "_correos_result": None,
+        "clean_ent_result": None,
+        "confirm_clean": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+_init_session_state()
+
+# addresses_cache se carga una sola vez (es costoso)
+if not st.session_state.addresses_cache:
     st.session_state.addresses_cache = address_matcher.load_cache()
-if "scenario_token" not in st.session_state:
-    st.session_state.scenario_token = None
-if "scenario_name" not in st.session_state:
-    st.session_state.scenario_name = None
-if "chat_messages" not in st.session_state:
-    st.session_state.chat_messages = []
 
 
 # ============================================================

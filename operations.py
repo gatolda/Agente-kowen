@@ -17,45 +17,117 @@ log = logging.getLogger("kowen.operations")
 
 # Lock de sincronizacion: scheduler (15 min), rutina diaria (08:00), CLI y
 # botones del dashboard pueden disparar la misma importacion concurrentemente.
-# Un lock de archivo evita duplicados y race conditions entre procesos distintos.
+# Lock atomico a nivel de OS (fcntl en Unix, msvcrt en Windows) — si el
+# proceso crashea, el OS libera el lock automaticamente (no hay "stale").
 _LOCK_DIR = os.path.join(os.path.dirname(__file__), "logs")
-_LOCK_STALE_SECONDS = 300  # 5 min: si el lock es mas viejo, se considera muerto
+
+try:
+    import fcntl  # noqa: F401 — Unix / Linux (GitHub Actions runner)
+    _LOCK_BACKEND = "fcntl"
+except ImportError:
+    try:
+        import msvcrt  # noqa: F401 — Windows
+        _LOCK_BACKEND = "msvcrt"
+    except ImportError:
+        _LOCK_BACKEND = "fallback"  # usar el método anterior (archivo + stale)
+
+_LOCK_STALE_SECONDS = 300  # solo para fallback
 
 
 @contextmanager
 def _sync_lock(name):
     """
-    Lock de archivo para evitar ejecuciones concurrentes de la misma operacion
-    entre procesos (scheduler, CLI, Streamlit, rutina diaria).
+    Lock atomico a nivel de OS para evitar ejecuciones concurrentes entre
+    procesos (scheduler, CLI, Streamlit, rutina diaria). Si crashea un
+    proceso con el lock tomado, el OS lo libera automaticamente.
 
-    Si el lock esta tomado y fresco, yielda False (el caller debe saltarse).
-    Si esta libre o stale, lo toma y yielda True.
+    Si el lock esta tomado por otro proceso, yielda False.
+    Si lo adquirio, yielda True.
     """
     os.makedirs(_LOCK_DIR, exist_ok=True)
     path = os.path.join(_LOCK_DIR, f"{name}.lock")
-    acquired = False
-    try:
-        if os.path.exists(path):
-            age = time.time() - os.path.getmtime(path)
-            if age < _LOCK_STALE_SECONDS:
-                log.info("Lock %s tomado hace %.0fs, saltando.", name, age)
+
+    if _LOCK_BACKEND == "fcntl":
+        import fcntl as _fcntl
+        f = None
+        try:
+            f = open(path, "w", encoding="utf-8")
+            try:
+                _fcntl.flock(f.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            except (OSError, IOError, BlockingIOError):
+                log.info("Lock %s tomado por otro proceso, saltando.", name)
+                f.close()
                 yield False
                 return
-            log.warning("Lock %s stale (%.0fs), tomando control.", name, age)
+            f.write(f"{os.getpid()} {datetime.now().isoformat()}\n")
+            f.flush()
+            yield True
+        finally:
+            if f is not None:
+                try:
+                    _fcntl.flock(f.fileno(), _fcntl.LOCK_UN)
+                    f.close()
+                    os.remove(path)
+                except Exception:
+                    pass
+
+    elif _LOCK_BACKEND == "msvcrt":
+        import msvcrt as _msvcrt
+        f = None
+        try:
+            f = open(path, "w", encoding="utf-8")
             try:
-                os.remove(path)
+                _msvcrt.locking(f.fileno(), _msvcrt.LK_NBLCK, 1)
             except OSError:
-                pass
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(f"{os.getpid()} {datetime.now().isoformat()}")
-        acquired = True
-        yield True
-    finally:
-        if acquired:
-            try:
-                os.remove(path)
-            except OSError as e:
-                log.warning("No se pudo borrar lock %s: %s", path, e)
+                log.info("Lock %s tomado por otro proceso, saltando.", name)
+                f.close()
+                yield False
+                return
+            f.write(f"{os.getpid()} {datetime.now().isoformat()}\n")
+            f.flush()
+            yield True
+        finally:
+            if f is not None:
+                try:
+                    _msvcrt.locking(f.fileno(), _msvcrt.LK_UNLCK, 1)
+                except Exception:
+                    pass
+                try:
+                    f.close()
+                except Exception:
+                    pass
+                # Retry de remove: en Windows a veces el handle aun no libero
+                for _attempt in range(5):
+                    try:
+                        os.remove(path)
+                        break
+                    except OSError:
+                        time.sleep(0.02)
+
+    else:  # fallback a archivo + stale detection (comportamiento anterior)
+        acquired = False
+        try:
+            if os.path.exists(path):
+                age = time.time() - os.path.getmtime(path)
+                if age < _LOCK_STALE_SECONDS:
+                    log.info("Lock %s tomado hace %.0fs, saltando.", name, age)
+                    yield False
+                    return
+                log.warning("Lock %s stale (%.0fs), tomando control.", name, age)
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(f"{os.getpid()} {datetime.now().isoformat()}")
+            acquired = True
+            yield True
+        finally:
+            if acquired:
+                try:
+                    os.remove(path)
+                except OSError as e:
+                    log.warning("No se pudo borrar lock %s: %s", path, e)
 from sheets_client import (
     get_pedidos, add_pedidos, update_pedido, update_pedidos_batch,
     delete_pedido, get_clientes, _get_service, _read_sheet, _write_sheet,

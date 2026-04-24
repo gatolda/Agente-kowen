@@ -18,6 +18,7 @@ import os
 import sys
 import time
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
 import config
@@ -33,7 +34,12 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, "agente_kowen.log"), encoding="utf-8"),
+        RotatingFileHandler(
+            os.path.join(LOG_DIR, "agente_kowen.log"),
+            maxBytes=5 * 1024 * 1024,  # 5MB por archivo
+            backupCount=5,             # Mantiene 5 archivos rotados (agente_kowen.log.1 .. .5)
+            encoding="utf-8",
+        ),
         logging.StreamHandler(),
     ],
 )
