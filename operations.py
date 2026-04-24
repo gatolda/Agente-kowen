@@ -588,6 +588,23 @@ def importar_bsale_a_operacion(pedido_bsale, codigo_drivin, fecha_destino=None,
         except Exception as e:
             log.warning("Fallo guardar match manual: %s", e)
 
+    # DEDUP: si el pedido_bsale ya existe en OPERACION DIARIA, NO duplicar.
+    # Protege contra doble-click, CLI duplicada, o re-imports accidentales.
+    bsale_nro = str(pedido_bsale.get("pedido_nro", "")).strip()
+    if bsale_nro:
+        existing = get_pedidos()
+        for p in existing:
+            if str(p.get("Pedido Bsale", "")).strip() == bsale_nro:
+                num_exist = p.get("#", "")
+                log.info("Bsale #%s ya existe como pedido #%s — skip", bsale_nro, num_exist)
+                return {
+                    "numero": int(num_exist) if str(num_exist).isdigit() else num_exist,
+                    "subido_drivin": False,
+                    "scenario_token": "",
+                    "motivo_no_subido": "ya existia en OPERACION DIARIA (dedup)",
+                    "duplicado": True,
+                }
+
     # 1. Agregar a OPERACION DIARIA
     num = sheets_client.add_pedido({
         "fecha": fecha_destino,
@@ -2494,6 +2511,79 @@ def sync_clientes_from_operacion():
 
     resultado["total_clientes"] = len(grupos)
     return resultado
+
+
+def detectar_duplicados(fecha=None):
+    """
+    Detecta posibles duplicados en OPERACION DIARIA para la fecha dada
+    (todos los días si fecha=None). 3 criterios:
+
+    1. Mismo Pedido Bsale (pedido_bsale) — inequívoco, es duplicado real
+    2. Mismo Codigo Drivin + Fecha — probablemente duplicado (un address_code
+       en un día rara vez tiene 2 pedidos reales distintos)
+    3. Misma (Direccion + Depto) normalizada + Fecha — sospechoso, puede
+       ser legítimo (2 pedidos al mismo cliente el mismo día) pero más común
+       es duplicación
+
+    Returns:
+        Dict con 3 listas:
+            - por_bsale: [{bsale_nro, numeros:[#,#,...], pedidos:[...]}]
+            - por_codigo: [{codigo_drivin, fecha, numeros:[#,#,...], pedidos:[...]}]
+            - por_direccion: [{dir_key, fecha, numeros:[#,#,...], pedidos:[...]}]
+        Y contadores totales.
+    """
+    from collections import defaultdict
+
+    pedidos = get_pedidos(fecha) if fecha else get_pedidos()
+
+    by_bsale = defaultdict(list)
+    by_codigo_fecha = defaultdict(list)
+    by_dir_fecha = defaultdict(list)
+
+    for p in pedidos:
+        nro = str(p.get("#", "")).strip()
+        bsale = str(p.get("Pedido Bsale", "")).strip()
+        codigo = str(p.get("Codigo Drivin", "")).strip()
+        fecha_p = str(p.get("Fecha", "")).strip()
+        direccion = str(p.get("Direccion", "")).strip()
+        depto = str(p.get("Depto", "")).strip()
+
+        if bsale and bsale != "0":
+            by_bsale[bsale].append(p)
+        if codigo and fecha_p:
+            by_codigo_fecha[(codigo, fecha_p)].append(p)
+        if direccion and fecha_p:
+            dir_key = (_normalize_address(direccion), unidecode(depto).lower().strip())
+            by_dir_fecha[(dir_key, fecha_p)].append(p)
+
+    # Filtrar solo los que tienen >1
+    por_bsale = [
+        {"bsale_nro": b, "numeros": [p.get("#") for p in lst], "pedidos": lst}
+        for b, lst in by_bsale.items() if len(lst) > 1
+    ]
+    por_codigo = [
+        {"codigo_drivin": cf[0], "fecha": cf[1],
+         "numeros": [p.get("#") for p in lst], "pedidos": lst}
+        for cf, lst in by_codigo_fecha.items() if len(lst) > 1
+    ]
+    por_direccion = [
+        {"direccion": lst[0].get("Direccion", ""),
+         "depto": lst[0].get("Depto", ""),
+         "fecha": df[1],
+         "numeros": [p.get("#") for p in lst],
+         "pedidos": lst}
+        for df, lst in by_dir_fecha.items() if len(lst) > 1
+    ]
+
+    return {
+        "por_bsale": por_bsale,
+        "por_codigo": por_codigo,
+        "por_direccion": por_direccion,
+        "total_bsale_duplicados": sum(len(x["numeros"]) - 1 for x in por_bsale),
+        "total_codigo_duplicados": sum(len(x["numeros"]) - 1 for x in por_codigo),
+        "total_direccion_duplicados": sum(len(x["numeros"]) - 1 for x in por_direccion),
+        "fecha": fecha or "todas",
+    }
 
 
 def bootstrap_memoria_direcciones():

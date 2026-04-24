@@ -1106,6 +1106,96 @@ with tab_op:
             f"**Fuera de drivin:** {fuera_bot}"
         )
 
+        # --- Detector de duplicados en OPERACION DIARIA ---
+        st.markdown("---")
+        st.markdown("##### 🔁 Detectar duplicados en la planilla")
+        st.caption(
+            "Busca pedidos duplicados por 3 criterios: mismo # Bsale, mismo código drivin + fecha, "
+            "o misma dirección + depto + fecha. Te permite eliminarlos con un click."
+        )
+
+        dup_cols = st.columns([2, 1])
+        with dup_cols[0]:
+            dup_fecha_solo_hoy = st.checkbox(
+                f"Solo para {op_fecha_str} (más rápido)", value=True, key="dup_hoy"
+            )
+        with dup_cols[1]:
+            if st.button("🔁 Detectar duplicados", key="btn_detect_dup",
+                         use_container_width=True):
+                with st.spinner("Buscando duplicados..."):
+                    try:
+                        fecha_arg = op_fecha_str if dup_fecha_solo_hoy else None
+                        st.session_state["_dup_result"] = operations.detectar_duplicados(fecha=fecha_arg)
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+        dup_r = st.session_state.get("_dup_result", None)
+        if dup_r:
+            total = (dup_r["total_bsale_duplicados"] +
+                     dup_r["total_codigo_duplicados"] +
+                     dup_r["total_direccion_duplicados"])
+            if total == 0:
+                st.success(f"✓ No hay duplicados detectados para {dup_r['fecha']}.")
+            else:
+                st.warning(
+                    f"⚠️ **{total} duplicados detectados** para {dup_r['fecha']}: "
+                    f"{dup_r['total_bsale_duplicados']} por Bsale, "
+                    f"{dup_r['total_codigo_duplicados']} por código drivin, "
+                    f"{dup_r['total_direccion_duplicados']} por dirección+fecha."
+                )
+
+                def _render_grupo(titulo, grupos, mostrar_key=None):
+                    if not grupos:
+                        return
+                    with st.expander(f"{titulo} ({len(grupos)} grupos · "
+                                     f"{sum(len(g['numeros'])-1 for g in grupos)} a borrar)",
+                                     expanded=False):
+                        st.caption(
+                            "Por cada grupo de pedidos duplicados, el sistema propone dejar "
+                            "el **más antiguo** (menor #) y borrar los demás."
+                        )
+                        for idx, g in enumerate(grupos):
+                            nros_sorted = sorted(
+                                [int(n) for n in g["numeros"] if str(n).isdigit()]
+                            )
+                            if len(nros_sorted) < 2:
+                                continue
+                            a_mantener = nros_sorted[0]
+                            a_borrar = nros_sorted[1:]
+
+                            titulo_grupo = g.get(mostrar_key or "direccion", "") or "—"
+                            if mostrar_key == "bsale_nro":
+                                titulo_grupo = f"Bsale #{titulo_grupo}"
+                            elif mostrar_key == "codigo_drivin":
+                                titulo_grupo = f"Código {titulo_grupo} · {g.get('fecha', '')}"
+
+                            st.markdown(
+                                f"**{titulo_grupo}** — mantener **#{a_mantener}**, "
+                                f"borrar: {', '.join('#'+str(n) for n in a_borrar)}"
+                            )
+                            cols = st.columns([3, 1])
+                            with cols[1]:
+                                key_btn = f"dup_del_{mostrar_key}_{idx}"
+                                if st.button(f"🗑 Borrar {len(a_borrar)}",
+                                             key=key_btn,
+                                             use_container_width=True):
+                                    try:
+                                        borrados = sheets_client.delete_pedidos_batch(
+                                            [str(n) for n in a_borrar]
+                                        )
+                                        st.success(f"✓ {borrados} eliminados")
+                                        st.session_state.pop("_dup_result", None)
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Error: {e}")
+
+                _render_grupo("🧾 Por número Bsale (inequívocos)",
+                              dup_r["por_bsale"], "bsale_nro")
+                _render_grupo("🏷 Por código drivin + fecha (muy probable)",
+                              dup_r["por_codigo"], "codigo_drivin")
+                _render_grupo("📍 Por dirección + fecha (sospechoso)",
+                              dup_r["por_direccion"], "direccion")
+
         # --- Comparar con Planillas Kowen y Cactus ---
         st.markdown("---")
         st.markdown("##### 📒 Comparar con Planillas Kowen y Cactus")
