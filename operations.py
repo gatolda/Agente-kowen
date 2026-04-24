@@ -1999,13 +1999,20 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
         addr_code = pod.get("address_code", "") or ""
         if not addr_code:
             continue
-        # Extraer fecha del POD (proof_of_delivery_at o delivered_at del
-        # primer order, o fallback al campo 'date' del POD)
+        # Extraer fecha del POD. En drivin los campos disponibles en orden
+        # de confiabilidad: proof_of_delivery_at (cuando existe, es la hora
+        # real del POD), delivered_at, delivery_date, deploy_date (fecha
+        # planeada del POD en el scenario — el mas fiable si aun no se
+        # ejecuto), created_at (fallback).
         pod_fecha = ""
         for o in pod.get("orders", []) or []:
-            ts = o.get("proof_of_delivery_at") or o.get("delivered_at") or ""
-            if ts:
-                pod_fecha = str(ts)[:10]  # YYYY-MM-DD
+            for key in ("proof_of_delivery_at", "delivered_at", "delivery_date",
+                        "deploy_date", "created_at"):
+                ts = o.get(key) or ""
+                if ts:
+                    pod_fecha = str(ts)[:10]  # YYYY-MM-DD
+                    break
+            if pod_fecha:
                 break
         if not pod_fecha:
             pod_fecha = str(pod.get("date", ""))[:10]
