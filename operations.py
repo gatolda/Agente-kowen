@@ -2019,13 +2019,8 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
         if pod_fecha:
             pods_by_code_fecha[(addr_code, pod_fecha)] = pod
 
-    # Debug: resumen del estado del verify
-    log.info(
-        "verify: %d pedidos pendientes / %d PODs indexados en %d claves (code+fecha)",
-        len(pendientes), len(all_pods), len(pods_by_code_fecha),
-    )
-    _stats_debug = {"sin_codigo": 0, "con_codigo_sin_pod": 0,
-                    "con_codigo_sin_fecha": 0, "match": 0}
+    _stats = {"sin_codigo": 0, "con_codigo_sin_pod": 0,
+              "con_codigo_sin_fecha": 0, "match": 0}
 
     estado_map = DRIVIN_STATUS_MAP
 
@@ -2061,23 +2056,15 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
                         pod = p_pod
                         break
 
-        # Debug counters
+        # Stats internos para log al final
         if not codigo:
-            _stats_debug["sin_codigo"] += 1
+            _stats["sin_codigo"] += 1
         elif not fecha_pedido_iso:
-            _stats_debug["con_codigo_sin_fecha"] += 1
+            _stats["con_codigo_sin_fecha"] += 1
         elif pod:
-            _stats_debug["match"] += 1
+            _stats["match"] += 1
         else:
-            _stats_debug["con_codigo_sin_pod"] += 1
-            fechas_del_code = [
-                f for (c, f), _ in pods_by_code_fecha.items() if c == codigo
-            ]
-            if fechas_del_code:
-                log.info(
-                    "verify #%s code=%r fecha_pedido=%s: POD(s) en fechas %s",
-                    nro_int, codigo, fecha_pedido_iso, fechas_del_code,
-                )
+            _stats["con_codigo_sin_pod"] += 1
 
         nuevo_estado = None
         driver = None
@@ -2190,15 +2177,14 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
         update_pedidos_batch(updates)
         resultado["actualizados"] = len(updates)
 
-    # Debug final: resumen de por qué matcheó o no
-    log.info(
-        "verify STATS: match=%d · sin_codigo=%d · con_codigo_sin_fecha=%d · "
-        "con_codigo_sin_POD=%d",
-        _stats_debug["match"],
-        _stats_debug["sin_codigo"],
-        _stats_debug["con_codigo_sin_fecha"],
-        _stats_debug["con_codigo_sin_pod"],
-    )
+    # Exponer stats al caller para visibilidad (UI o logs)
+    resultado["stats_match"] = _stats
+    if _stats["sin_codigo"] > 0:
+        log.warning(
+            "verify: %d pedidos PENDIENTE sin código drivin (no se pueden matchear con PODs). "
+            "Ejecutar matcher desde dashboard: 'Pendientes sin código drivin' → 'Asignar códigos auto'.",
+            _stats["sin_codigo"],
+        )
     return resultado
 
 
