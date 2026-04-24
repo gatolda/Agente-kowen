@@ -2435,6 +2435,81 @@ def sync_clientes_from_operacion():
     return resultado
 
 
+def auto_avanzar_scenario(scenario_token):
+    """
+    Avanza el ciclo de vida de un scenario drivin de forma idempotente.
+    Se llama desde la rutina diaria en cada ejecucion. Solo actua si el
+    scenario esta en un estado que permite avanzar:
+
+        Ready/Draft        -> optimize       (drivin calcula rutas)
+        Optimizing         -> esperar        (nada, proxima corrida)
+        Optimized          -> approve        (libera rutas a conductores)
+        Approved/Started/  -> nada           (ya esta en la calle o termino)
+          Finished
+
+    Returns:
+        Dict con {status_antes, accion, status_despues, ok}.
+    """
+    import drivin_client
+
+    if not scenario_token:
+        return {"status_antes": "", "accion": "skip", "ok": False, "motivo": "sin token"}
+
+    try:
+        st_info = drivin_client.get_scenario_status(scenario_token)
+    except Exception as e:
+        return {"status_antes": "?", "accion": "error", "ok": False, "motivo": str(e)}
+
+    status_raw = st_info.get("response", {}).get("status", "") or st_info.get("status", "")
+    status = str(status_raw).strip().lower()
+
+    # Normalizar (drivin a veces usa "ready", "Optimized", etc.)
+    resultado = {"status_antes": status_raw, "accion": "nada", "ok": True}
+
+    # Estados avanzados = no tocar
+    if status in ("approved", "started", "running", "finished", "completed"):
+        resultado["accion"] = "skip"
+        resultado["motivo"] = f"scenario ya en estado terminal/iniciado ({status})"
+        return resultado
+
+    # En medio de optimizacion = esperar proxima corrida
+    if status in ("optimizing", "approving"):
+        resultado["accion"] = "esperar"
+        resultado["motivo"] = f"scenario en transicion ({status})"
+        return resultado
+
+    # Ready/Draft -> optimizar
+    if status in ("ready", "draft", "new", ""):
+        try:
+            drivin_client.optimize_scenario(scenario_token)
+            resultado["accion"] = "optimize"
+            log.info("Scenario %s -> optimize disparado", scenario_token[:12])
+            return resultado
+        except Exception as e:
+            resultado["ok"] = False
+            resultado["accion"] = "error_optimize"
+            resultado["motivo"] = str(e)
+            return resultado
+
+    # Optimized -> aprobar
+    if status == "optimized":
+        try:
+            drivin_client.approve_scenario(scenario_token)
+            resultado["accion"] = "approve"
+            log.info("Scenario %s -> approve disparado", scenario_token[:12])
+            return resultado
+        except Exception as e:
+            resultado["ok"] = False
+            resultado["accion"] = "error_approve"
+            resultado["motivo"] = str(e)
+            return resultado
+
+    # Estado desconocido = no tocar
+    resultado["accion"] = "skip"
+    resultado["motivo"] = f"estado no manejado ({status})"
+    return resultado
+
+
 # ===== RUTINA DIARIA =====
 
 def rutina_diaria(fecha_hoy=None):
@@ -2692,6 +2767,15 @@ def rutina_diaria(fecha_hoy=None):
             resultado["drivin_plan"] = ""
             resultado["drivin_subidos"] = 0
             resultado["drivin_token"] = ""
+
+        # --- PASO 7b: Avanzar el scenario (optimize + approve idempotente) ---
+        # Corre en cada rutina del dia. Si ya esta aprobado/iniciado, skippea.
+        if scenario_token:
+            try:
+                resultado["drivin_avance"] = auto_avanzar_scenario(scenario_token)
+            except Exception as e:
+                resultado["errores"].append(f"Error optimize/approve drivin: {e}")
+                resultado["drivin_avance"] = {"error": str(e)}
     except Exception as e:
         resultado["errores"].append(f"Error subiendo a driv.in: {e}")
 
