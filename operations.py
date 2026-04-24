@@ -1896,17 +1896,17 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
             )
         tramo_inicio = tramo_fin + timedelta(days=1)
 
-    # Indexar PODs por address_code y por direccion normalizada
+    # Indexar PODs SOLO por address_code (codigo drivin).
+    # IMPORTANTE: no indexamos por direccion porque genera falsos positivos —
+    # dos clientes distintos con misma calle/numero pero distinto dpto/piso
+    # tienen el mismo address_1 normalizado. Si matcheamos por direccion,
+    # marcamos como ENTREGADO pedidos residuales que nada tienen que ver
+    # con el POD real. Solo codigo drivin es identificador unico.
     pods_by_code = {}
-    pods_by_addr = {}
     for pod in all_pods:
         addr_code = pod.get("address_code", "")
         if addr_code:
             pods_by_code[addr_code] = pod
-        addr_1 = pod.get("address_1", "") or ""
-        addr_norm = _normalize_address(addr_1)
-        if addr_norm:
-            pods_by_addr[addr_norm] = pod
 
     estado_map = DRIVIN_STATUS_MAP
 
@@ -1922,15 +1922,12 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
         plan = p.get("Plan Drivin", "").strip()
         fecha_pedido = p.get("Fecha", "")
         direccion = p.get("Direccion", "")
-        dir_norm = _normalize_address(direccion)
         estado_actual = p.get("Estado Pedido", "")
 
-        # Buscar POD por codigo o por direccion
-        pod = None
-        if codigo:
-            pod = pods_by_code.get(codigo)
-        if not pod and dir_norm:
-            pod = pods_by_addr.get(dir_norm)
+        # Buscar POD SOLO por codigo drivin (no por direccion — genera falsos
+        # positivos). Los pedidos sin codigo drivin asignado no se actualizan
+        # automaticamente; deben recibir codigo primero.
+        pod = pods_by_code.get(codigo) if codigo else None
 
         nuevo_estado = None
         driver = None

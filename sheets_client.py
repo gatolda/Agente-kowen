@@ -83,18 +83,33 @@ def _get_service():
     return _service
 
 
-def _retry(func, max_retries=3):
-    """Ejecuta una funcion con retry y backoff para manejar rate limits."""
+def _retry(func, max_retries=4):
+    """Ejecuta una funcion con retry + backoff exponencial para manejar rate limits.
+
+    Detecta rate limits/errores transitorios por:
+    - HttpError.resp.status en [429, 500, 502, 503, 504]
+    - Strings "429", "500", "503", "RATE_LIMIT", "Quota exceeded" en el mensaje
+    """
     import time
+    _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+    _RETRYABLE_STRS = ("429", "500", "502", "503", "504", "RATE_LIMIT",
+                       "Quota exceeded", "backend error")
     for attempt in range(max_retries):
         try:
             return func()
         except Exception as e:
-            error_str = str(e)
-            if attempt < max_retries - 1 and any(
-                code in error_str for code in ("429", "500", "503", "RATE_LIMIT")
-            ):
-                wait = 2 ** attempt
+            is_retryable = False
+            # Chequeo por status code HTTP (googleapiclient.errors.HttpError)
+            status = getattr(getattr(e, "resp", None), "status", None)
+            if status in _RETRYABLE_STATUS:
+                is_retryable = True
+            else:
+                error_str = str(e)
+                if any(s in error_str for s in _RETRYABLE_STRS):
+                    is_retryable = True
+
+            if is_retryable and attempt < max_retries - 1:
+                wait = 2 ** attempt  # 1s, 2s, 4s, 8s
                 time.sleep(wait)
                 continue
             raise
@@ -351,10 +366,10 @@ def delete_pedidos_batch(row_numbers):
         }
     } for r in rows_to_del]
 
-    service.spreadsheets().batchUpdate(
+    _retry(lambda: service.spreadsheets().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": requests},
-    ).execute()
+    ).execute())
     return len(rows_to_del)
 
 
@@ -383,7 +398,7 @@ def delete_pedido(row_number):
             sheet_id = s["properties"]["sheetId"]
             break
 
-    service.spreadsheets().batchUpdate(
+    _retry(lambda: service.spreadsheets().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": [{
             "deleteDimension": {
@@ -395,7 +410,7 @@ def delete_pedido(row_number):
                 }
             }
         }]}
-    ).execute()
+    ).execute())
 
 
 # Mapeo de campo a indice de columna
@@ -479,10 +494,10 @@ def update_pedidos_batch(updates_list):
 
     if data:
         service = _get_service()
-        service.spreadsheets().values().batchUpdate(
+        _retry(lambda: service.spreadsheets().values().batchUpdate(
             spreadsheetId=SPREADSHEET_ID,
             body={"valueInputOption": "USER_ENTERED", "data": data},
-        ).execute()
+        ).execute())
 
 
 # ===== CLIENTES =====
@@ -593,10 +608,10 @@ def update_cliente(nombre, updates, row_idx=None):
         return
 
     service = _get_service()
-    service.spreadsheets().values().batchUpdate(
+    _retry(lambda: service.spreadsheets().values().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"valueInputOption": "USER_ENTERED", "data": data},
-    ).execute()
+    ).execute())
 
 
 # ===== PAGOS =====
@@ -690,10 +705,10 @@ def _ensure_log_tab():
     meta = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
     tabs = [s["properties"]["title"] for s in meta["sheets"]]
     if TAB_LOG not in tabs:
-        service.spreadsheets().batchUpdate(
+        _retry(lambda: service.spreadsheets().batchUpdate(
             spreadsheetId=SPREADSHEET_ID,
             body={"requests": [{"addSheet": {"properties": {"title": TAB_LOG}}}]},
-        ).execute()
+        ).execute())
         _write_sheet(TAB_LOG, "A1:F1", [[
             "Fecha/Hora", "Tipo", "Accion", "Detalle", "Resultado", "Origen",
         ]])

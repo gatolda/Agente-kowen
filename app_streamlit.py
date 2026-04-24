@@ -53,6 +53,7 @@ import bsale_client
 import drivin_client
 import address_matcher
 import observability
+import config
 
 observability.init_sentry(component="streamlit")
 
@@ -218,7 +219,7 @@ if "chat_messages" not in st.session_state:
 
 with st.sidebar:
     st.markdown('<div class="sidebar-logo">KOWEN</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="sidebar-date">{datetime.now().strftime("%A %d / %B / %Y")}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sidebar-date">{config.now().strftime("%A %d / %B / %Y")}</div>', unsafe_allow_html=True)
 
     st.caption("La rutina diaria corre automatica 7am lun-vie. Usa 🔧 Mantenimiento si necesitas forzarla.")
 
@@ -290,7 +291,7 @@ with st.sidebar:
 
         # Deteccion de duplicado: pedidos hoy para mismo cliente/dir/codigo
         try:
-            _pedidos_hoy = sheets_client.get_pedidos(datetime.now().strftime("%d/%m/%Y"))
+            _pedidos_hoy = sheets_client.get_pedidos(config.now().strftime("%d/%m/%Y"))
         except Exception:
             _pedidos_hoy = []
         dups = fh.pedidos_mismo_cliente_hoy(
@@ -306,7 +307,7 @@ with st.sidebar:
             )
 
         with st.form("form_nuevo_pedido", clear_on_submit=True):
-            new_fecha = st.date_input("Fecha del pedido", value=datetime.now().date(), key="new_fecha")
+            new_fecha = st.date_input("Fecha del pedido", value=config.now().date(), key="new_fecha")
             new_dir = st.text_input("Direccion", value=data["direccion"])
             c1, c2 = st.columns(2)
             with c1:
@@ -390,7 +391,7 @@ with st.sidebar:
             with plan_tab1:
                 planes = []
                 for delta in range(0, 3):
-                    fecha_b = (datetime.now() + timedelta(days=delta)).strftime("%Y-%m-%d")
+                    fecha_b = (config.now() + timedelta(days=delta)).strftime("%Y-%m-%d")
                     try:
                         r = drivin_client.get_scenarios_by_date(fecha_b)
                         for s in r.get("response", []):
@@ -412,7 +413,7 @@ with st.sidebar:
                     st.caption("Sin planes recientes")
 
             with plan_tab2:
-                plan_date = st.date_input("Fecha", value=datetime.now().date(), key="plan_date")
+                plan_date = st.date_input("Fecha", value=config.now().date(), key="plan_date")
                 plan_name = st.text_input("Nombre", value=f"{plan_date.strftime('%d/%m/%Y')}API")
                 if st.button("Crear", key="btn_crear", use_container_width=True):
                     with st.spinner("Creando..."):
@@ -441,7 +442,7 @@ with st.sidebar:
     # --- Limpiar entregados ---
     with st.expander("✅  Limpiar entregados", expanded=False):
         st.caption("Consulta driv.in y elimina pedidos ya entregados de una fecha.")
-        clean_ent_date = st.date_input("Fecha a revisar", value=(datetime.now() + timedelta(days=1)).date(), key="clean_ent_date")
+        clean_ent_date = st.date_input("Fecha a revisar", value=(config.now() + timedelta(days=1)).date(), key="clean_ent_date")
         clean_ent_fecha = clean_ent_date.strftime("%d/%m/%Y")
 
         if st.button(f"Revisar entregados del {clean_ent_fecha}", key="btn_clean_ent", use_container_width=True):
@@ -568,7 +569,7 @@ with st.sidebar:
 
         # --- Bsale ---
         with m_t2:
-            bsale_fecha = st.date_input("Fecha destino", value=datetime.now().date(), key="bsale_fecha")
+            bsale_fecha = st.date_input("Fecha destino", value=config.now().date(), key="bsale_fecha")
 
             if st.button("🔄 Sincronizar pedidos web", key="btn_bsale_check", use_container_width=True):
                 with st.spinner("Consultando Bsale..."):
@@ -712,7 +713,7 @@ with st.sidebar:
 
         # --- Planilla Reparto ---
         with m_t3:
-            rep_date = st.date_input("Fecha a importar", value=datetime.now().date(), key="rep_date")
+            rep_date = st.date_input("Fecha a importar", value=config.now().date(), key="rep_date")
             rep_fecha_str = rep_date.strftime("%d/%m/%Y")
             if st.button("Importar PRIMER TURNO", key="btn_reparto", use_container_width=True):
                 with st.spinner(f"Leyendo planilla reparto ({rep_fecha_str})..."):
@@ -728,7 +729,7 @@ with st.sidebar:
 
         # --- Planilla Cactus ---
         with m_t4:
-            cac_date = st.date_input("Fecha Cactus", value=datetime.now().date(), key="cac_date")
+            cac_date = st.date_input("Fecha Cactus", value=config.now().date(), key="cac_date")
             cac_fecha_str = cac_date.strftime("%d/%m/%Y")
             if st.button("Importar Cactus", key="btn_cactus", use_container_width=True):
                 with st.spinner(f"Leyendo planilla Cactus ({cac_fecha_str})..."):
@@ -745,7 +746,7 @@ with st.sidebar:
         # --- Limpiar pedidos ---
         with m_t5:
             st.caption("Elimina TODOS los pedidos de una fecha.")
-            clean_date = st.date_input("Fecha a limpiar", value=datetime.now().date(), key="clean_date")
+            clean_date = st.date_input("Fecha a limpiar", value=config.now().date(), key="clean_date")
             clean_fecha = clean_date.strftime("%d/%m/%Y")
             if st.button(f"Borrar pedidos del {clean_fecha}", key="btn_clean", use_container_width=True):
                 st.session_state["confirm_clean"] = clean_fecha
@@ -806,7 +807,7 @@ with tab_op:
     # =========== Controles superiores (fijos) ===========
     ctl1, ctl2, ctl3 = st.columns([1.2, 1, 2])
     with ctl1:
-        op_fecha = st.date_input("Fecha", value=datetime.now().date(), key="op_fecha")
+        op_fecha = st.date_input("Fecha", value=config.now().date(), key="op_fecha")
     with ctl2:
         op_marca = st.selectbox("Marca", ["Todas", "Kowen", "Cactus"], key="op_marca")
     with ctl3:
@@ -1720,7 +1721,7 @@ with tab_op:
                                          use_container_width=True,
                                          disabled=cob_monto <= 0):
                                 try:
-                                    fecha_cobro = datetime.now().strftime("%d/%m/%Y")
+                                    fecha_cobro = config.now().strftime("%d/%m/%Y")
                                     campo = "efectivo" if cob_medio == "Efectivo" else "transferencia"
                                     updates = {
                                         "estado_pago": "PAGADO",
@@ -1944,7 +1945,7 @@ with tab_lotes:
 
     col_a, col_b, col_c = st.columns([1, 1, 1])
     with col_a:
-        lotes_fecha = st.date_input("Fecha", value=datetime.now().date(), key="lotes_fecha")
+        lotes_fecha = st.date_input("Fecha", value=config.now().date(), key="lotes_fecha")
     with col_b:
         if st.button("Agregar fila", use_container_width=True, key="btn_lotes_addrow"):
             nueva = pd.DataFrame([{c: "" for c in col_defs}])
@@ -2278,7 +2279,7 @@ with tab_sync:
     with sync_t1:
         st.markdown("##### Actualizar estado, repartidor y comentarios desde driv.in")
         st.caption("Usa los PODs (proof of delivery) para traer el estado real de cada pedido.")
-        sync_date = st.date_input("Fecha", value=datetime.now().date(), key="sync_date")
+        sync_date = st.date_input("Fecha", value=config.now().date(), key="sync_date")
         sync_fecha = sync_date.strftime("%d/%m/%Y")
 
         if st.button("Sincronizar desde driv.in", key="btn_sync", type="primary", use_container_width=True):
@@ -2299,7 +2300,7 @@ with tab_sync:
     with sync_t2:
         st.markdown("##### Sincronizar hacia Planilla Reparto (PRIMER TURNO)")
         st.caption("Escribe los pedidos del sistema en la planilla reparto de Google Sheets.")
-        sync2_date = st.date_input("Fecha", value=datetime.now().date(), key="sync2_date")
+        sync2_date = st.date_input("Fecha", value=config.now().date(), key="sync2_date")
         sync2_fecha = sync2_date.strftime("%d/%m/%Y")
 
         if st.button("Sincronizar hacia planilla reparto", key="btn_sync_reparto", type="primary", use_container_width=True):
@@ -2402,7 +2403,7 @@ with tab_log:
         if "Fecha/Hora" in df.columns:
             try:
                 df["_dt"] = pd.to_datetime(df["Fecha/Hora"], format="%d/%m/%Y %H:%M:%S", errors="coerce")
-                corte = datetime.now() - timedelta(days=int(limite_dias))
+                corte = config.now() - timedelta(days=int(limite_dias))
                 df = df[df["_dt"].notna() & (df["_dt"] >= corte)]
                 df = df.sort_values("_dt", ascending=False).drop(columns=["_dt"])
             except Exception:
