@@ -1029,11 +1029,48 @@ with tab_op:
 
         total_bot = sum(v["botellones"] for v in by_canal.values())
         total_drivin_bot = sum(_cant_of(p) for p in pedidos_ruta if p.get("en_drivin"))
+        fuera_bot = total_bot - total_drivin_bot
         st.caption(
             f"**Total OPERACION DIARIA:** {len(pedidos_ruta)} pedidos · {total_bot} botellones  ·  "
             f"**En drivin:** {total_drivin_bot} botellones  ·  "
-            f"**Fuera de drivin:** {total_bot - total_drivin_bot}"
+            f"**Fuera de drivin:** {fuera_bot}"
         )
+
+        # Detalle de los pedidos fuera de drivin
+        fuera = [p for p in pedidos_ruta if not p.get("en_drivin")]
+        if fuera:
+            sin_cod = [p for p in fuera if not (p.get("codigo_drivin") or "").strip()]
+            con_cod = [p for p in fuera if (p.get("codigo_drivin") or "").strip()]
+            with st.expander(
+                f"📋 Ver los {len(fuera)} pedidos fuera de drivin "
+                f"({len(sin_cod)} sin código · {len(con_cod)} con código no subido)",
+                expanded=False,
+            ):
+                if sin_cod:
+                    st.markdown(f"**🔖 Sin código drivin ({len(sin_cod)}):**")
+                    df_sc = pd.DataFrame([
+                        {"#": p["numero"], "Cliente": p["cliente"] or "—",
+                         "Dirección": p["direccion"], "Comuna": p["comuna"],
+                         "Cant": p["cantidad"], "Marca": p["marca"],
+                         "Canal": p["canal"], "Estado": p["estado"]}
+                        for p in sin_cod
+                    ])
+                    st.dataframe(df_sc, use_container_width=True, hide_index=True)
+                if con_cod:
+                    st.markdown(f"**⚠ Con código drivin pero no en el plan ({len(con_cod)}):**")
+                    df_cc = pd.DataFrame([
+                        {"#": p["numero"], "Cliente": p["cliente"] or "—",
+                         "Dirección": p["direccion"], "Comuna": p["comuna"],
+                         "Cant": p["cantidad"], "Marca": p["marca"],
+                         "Código": p["codigo_drivin"],
+                         "Canal": p["canal"], "Estado": p["estado"]}
+                        for p in con_cod
+                    ])
+                    st.dataframe(df_cc, use_container_width=True, hide_index=True)
+                    st.caption(
+                        "Estos tienen código pero no aparecen en el scenario drivin de hoy. "
+                        "Puede ser que se hayan subido a otro plan o que falte hacer el sync."
+                    )
 
         # Planes sin despachar (consulta bajo demanda)
         st.markdown("---")
