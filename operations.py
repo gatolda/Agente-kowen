@@ -587,7 +587,7 @@ def importar_bsale_a_operacion(pedido_bsale, codigo_drivin, fecha_destino=None,
     }
 
 
-def sync_operacion_con_drivin(fecha=None, dry_run=True):
+def sync_operacion_con_drivin(fecha=None, dry_run=True, reprogramar_a_manana=None):
     """
     Sincroniza OPERACION DIARIA con el scenario drivin de la fecha (Opcion C).
 
@@ -722,12 +722,47 @@ def sync_operacion_con_drivin(fecha=None, dry_run=True):
         return resultado
 
     # 5. Ejecutar: borrar pendientes residuales + crear los nuevos de drivin
-    # Todo en BATCH para no pasar rate limit de Sheets API (60 requests/min).
+    # Algunos pedidos se reprograman a mañana en vez de borrarse (ej: desasignados/rechazados)
+    reprogramar_set = set(
+        str(n).strip() for n in (reprogramar_a_manana or []) if str(n).strip()
+    )
+
+    # Calcular fecha de mañana en formato DD/MM/YYYY
+    hoy_dt = datetime(int(parts[2]), int(parts[1]), int(parts[0]))
+    manana_dt = hoy_dt + timedelta(days=1)
+    fecha_manana = manana_dt.strftime("%d/%m/%Y")
+
+    # Separar los que se reprograman vs los que se borran
+    a_reprogramar = [p for p in a_borrar
+                     if str(p.get("#", "")).strip() in reprogramar_set]
+    a_borrar_real = [p for p in a_borrar
+                     if str(p.get("#", "")).strip() not in reprogramar_set]
+
     errores = []
+
+    # Reprogramar: cambiar fecha y dejar PENDIENTE (rutina mañana los tomará)
+    reprogramados = 0
+    if a_reprogramar:
+        updates = []
+        for p in a_reprogramar:
+            nro_str = str(p.get("#", "")).strip()
+            if nro_str.isdigit():
+                updates.append((int(nro_str), {
+                    "fecha": fecha_manana,
+                    "estado_pedido": "PENDIENTE",
+                    "plan_drivin": "",
+                }))
+        if updates:
+            try:
+                sheets_client.update_pedidos_batch(updates)
+                reprogramados = len(updates)
+            except Exception as e:
+                log.warning("Fallo batch reprogramar: %s", e)
+                errores.append(f"reprogramados: {e}")
 
     # Borrar todos en 1 sola llamada (read + batchUpdate)
     borrados = 0
-    nros_a_borrar = [str(p.get("#", "")).strip() for p in a_borrar
+    nros_a_borrar = [str(p.get("#", "")).strip() for p in a_borrar_real
                      if str(p.get("#", "")).strip().isdigit()]
     if nros_a_borrar:
         try:
@@ -763,6 +798,8 @@ def sync_operacion_con_drivin(fecha=None, dry_run=True):
     resultado["ejecutado"] = True
     resultado["borrados_ok"] = borrados
     resultado["creados_ok"] = creados
+    resultado["reprogramados_ok"] = reprogramados
+    resultado["fecha_reprogramacion"] = fecha_manana if reprogramados else ""
     if errores:
         resultado["errores"] = errores
     return resultado

@@ -1298,18 +1298,53 @@ with tab_op:
                     df_c = pd.DataFrame(plan["a_crear"])
                     st.dataframe(df_c, use_container_width=True, hide_index=True)
 
+            # Multiselect para marcar pedidos que se mueven a mañana en vez de borrarse
+            reprogramar = []
+            if plan["a_borrar"]:
+                st.markdown("")
+                st.markdown("**📅 Reprogramar a mañana en vez de borrar** (ej: desasignados, rechazados)")
+                opts = [str(p.get("#", "")).strip() for p in plan["a_borrar"]
+                        if str(p.get("#", "")).strip()]
+                def _fmt_op(n):
+                    for p in plan["a_borrar"]:
+                        if str(p.get("#", "")).strip() == n:
+                            return (f"#{n} — {(p.get('Cliente') or '—')[:25]} · "
+                                    f"{p.get('Direccion','')[:30]} · {p.get('Comuna','')[:15]}")
+                    return f"#{n}"
+                reprogramar = st.multiselect(
+                    "Seleccioná los que deben ir al próximo día hábil (el resto se borra):",
+                    options=opts,
+                    format_func=_fmt_op,
+                    key="sync_reprogramar",
+                )
+                if reprogramar:
+                    st.caption(
+                        f"✓ {len(reprogramar)} pedido(s) pasarán a mañana con estado PENDIENTE. "
+                        f"Los otros {len(opts) - len(reprogramar)} se borrarán."
+                    )
+
             st.warning(
                 "⚠️ Si aplicás, **no hay deshacer** — los pedidos borrados quedarán eliminados. "
-                "Revisá las listas antes de confirmar."
+                "Los reprogramados cambian de fecha y quedan PENDIENTES mañana."
             )
-            if st.button("✓ APLICAR sincronización (destructivo)",
+            if st.button("✓ APLICAR sincronización",
                          key="btn_sync_apply", type="primary", use_container_width=True):
                 with st.spinner("Aplicando cambios..."):
                     try:
-                        r = operations.sync_operacion_con_drivin(fecha=op_fecha_str, dry_run=False)
-                        st.success(
-                            f"✓ Hecho. Borrados: **{r['borrados_ok']}** · Creados: **{r['creados_ok']}**"
+                        r = operations.sync_operacion_con_drivin(
+                            fecha=op_fecha_str,
+                            dry_run=False,
+                            reprogramar_a_manana=reprogramar,
                         )
+                        msg_parts = [f"✓ Borrados: **{r['borrados_ok']}**"]
+                        if r.get("reprogramados_ok"):
+                            msg_parts.append(
+                                f"Reprogramados a {r.get('fecha_reprogramacion','')}: "
+                                f"**{r['reprogramados_ok']}**"
+                            )
+                        if r.get("creados_ok"):
+                            msg_parts.append(f"Creados: **{r['creados_ok']}**")
+                        st.success(" · ".join(msg_parts))
                         st.session_state.pop("_sync_plan", None)
                         st.rerun()
                     except Exception as e:
