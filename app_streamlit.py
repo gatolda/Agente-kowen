@@ -1203,14 +1203,41 @@ with tab_op:
                         "Puede ser que se hayan subido a otro plan o que falte hacer el sync."
                     )
 
-        # Verificar estados contra drivin (PODs)
+        # Ejecutar rutina completa AHORA
         st.markdown("---")
-        vcol1, vcol2 = st.columns(2)
-        with vcol1:
-            if st.button("🔄 Actualizar estados contra driv.in (AHORA)",
-                         key="btn_verify_now", type="primary", use_container_width=True,
-                         help="Consulta PODs de drivin y actualiza ENTREGADO/NO ENTREGADO en la planilla"):
-                with st.spinner("Consultando PODs de drivin y actualizando planilla..."):
+        st.markdown("##### 🚀 Acciones rápidas")
+        st.caption(
+            "Normalmente la rutina corre automática cada hora (9-19h lun-vie). "
+            "Usá estos botones solo si querés forzar una ejecución ahora."
+        )
+        rc1, rc2, rc3 = st.columns(3)
+        with rc1:
+            if st.button("🚀 Ejecutar rutina AHORA",
+                         key="btn_rutina_now", type="primary", use_container_width=True,
+                         help="Corre el flujo completo: importa planillas + asigna códigos + sube a drivin + optimize/approve + verifica PODs"):
+                with st.spinner("Ejecutando rutina completa (puede tardar 30-60s)..."):
+                    try:
+                        r = operations.rutina_diaria(fecha_hoy=op_fecha_str)
+                        msg_parts = [
+                            f"✓ Planilla +{r.get('planilla_importados',0)}",
+                            f"Cactus +{r.get('cactus_importados',0)}",
+                            f"Códigos {r.get('codigos_asignados',0)}",
+                            f"drivin +{r.get('drivin_subidos',0)}",
+                        ]
+                        avance = r.get("drivin_avance", {}) or {}
+                        if avance.get("accion") and avance.get("accion") != "skip":
+                            msg_parts.append(f"Scenario → {avance['accion']}")
+                        st.success(" · ".join(msg_parts))
+                        if r.get("errores"):
+                            for err in r["errores"]:
+                                st.warning(err)
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+        with rc2:
+            if st.button("🔄 Solo verificar PODs",
+                         key="btn_verify_now", use_container_width=True,
+                         help="Consulta PODs de drivin y actualiza ENTREGADO/NO ENTREGADO. No sube pedidos nuevos."):
+                with st.spinner("Consultando PODs de drivin..."):
                     try:
                         v = operations.verify_orders_drivin(fecha=op_fecha_str, auto_update=True)
                         st.session_state["_drivin_v"] = v
@@ -1221,8 +1248,8 @@ with tab_op:
                         )
                     except Exception as e:
                         st.error(f"Error: {e}")
-        with vcol2:
-            if st.button("🔍 Planes sin despachar en driv.in",
+        with rc3:
+            if st.button("🔍 Planes sin despachar",
                          key="btn_plan_chk", use_container_width=True):
                 with st.spinner("Consultando driv.in..."):
                     try:
