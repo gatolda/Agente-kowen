@@ -1036,6 +1036,80 @@ with tab_op:
             f"**Fuera de drivin:** {fuera_bot}"
         )
 
+        # --- Comparar con Planillas Kowen y Cactus ---
+        st.markdown("---")
+        st.markdown("##### 📒 Comparar con Planillas Kowen y Cactus")
+        st.caption("Revisa cuántos pedidos de OPERACION DIARIA matchean con cada planilla fuente.")
+
+        if st.button("🔍 Comparar con planillas", key="btn_diag_planillas", use_container_width=True):
+            with st.spinner("Leyendo planillas Kowen, Cactus y OPERACION DIARIA..."):
+                try:
+                    diag_p = operations.diagnostico_vs_planillas(fecha=op_fecha_str)
+                    st.session_state["_diag_planillas"] = diag_p
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+        dp = st.session_state.get("_diag_planillas", None)
+        if dp:
+            dc1, dc2, dc3 = st.columns(3)
+            dc1.metric("OPERACION DIARIA",
+                       f"{dp['total_operacion']} ped",
+                       delta=f"{dp['bot_operacion']} botellones", delta_color="off")
+            dc2.metric("Planilla Kowen",
+                       f"{dp['total_kowen']} ped",
+                       delta=f"{dp['bot_kowen']} botellones", delta_color="off")
+            dc3.metric("Planilla Cactus",
+                       f"{dp['total_cactus']} ped",
+                       delta=f"{dp['bot_cactus']} botellones", delta_color="off")
+
+            mk = len(dp['matcheados_kowen'])
+            mc = len(dp['matcheados_cactus'])
+            smh = len(dp['sin_match_historico'])
+            smp = len(dp['sin_match_pendientes'])
+            fk = len(dp['faltantes_kowen'])
+            fc = len(dp['faltantes_cactus'])
+
+            st.info(
+                f"**Análisis del match:**\n\n"
+                f"- ✅ En OPERACION y matchean con **Planilla Kowen**: {mk}\n"
+                f"- ✅ En OPERACION y matchean con **Planilla Cactus**: {mc}\n"
+                f"- 📦 En OPERACION sin match pero **histórico** (ENTREGADO/PAGADO/NO ENTREGADO): {smh}\n"
+                f"- 🗑 En OPERACION **PENDIENTE sin match** en ninguna planilla (candidatos a borrar): **{smp}**\n"
+                f"- ➕ En Planilla Kowen **faltantes** en OPERACION: {fk}\n"
+                f"- ➕ En Planilla Cactus **faltantes** en OPERACION: {fc}"
+            )
+
+            if dp['sin_match_pendientes']:
+                with st.expander(f"🗑 Ver los {smp} pendientes sin match en planilla", expanded=False):
+                    df_smp = pd.DataFrame([
+                        {"#": p.get("#",""), "Cliente": p.get("Cliente","") or "—",
+                         "Dirección": p.get("Direccion",""), "Comuna": p.get("Comuna",""),
+                         "Cant": p.get("Cant",""), "Marca": p.get("Marca",""),
+                         "Canal": p.get("Canal",""), "Código": p.get("Codigo Drivin","") or "—"}
+                        for p in dp['sin_match_pendientes']
+                    ])
+                    st.dataframe(df_smp, use_container_width=True, hide_index=True)
+
+            if dp['faltantes_kowen'] or dp['faltantes_cactus']:
+                with st.expander(f"➕ Ver {fk + fc} pedidos de planilla sin reflejo en OPERACION", expanded=False):
+                    combinados = [{**p, "_fuente": "Kowen"} for p in dp['faltantes_kowen']] + \
+                                 [{**p, "_fuente": "Cactus"} for p in dp['faltantes_cactus']]
+                    df_fc = pd.DataFrame([
+                        {"Fuente": c.get("_fuente"), "Cliente": c.get("cliente","") or "—",
+                         "Dirección": c.get("direccion",""), "Depto": c.get("depto","") or "—",
+                         "Comuna": c.get("comuna","") or "—", "Cant": c.get("cant",""),
+                         "Marca": c.get("marca",""), "Estado": c.get("estado_pedido","")}
+                        for c in combinados
+                    ])
+                    st.dataframe(df_fc, use_container_width=True, hide_index=True)
+
+            if smp > 0:
+                st.markdown("")
+                st.warning(
+                    f"⚠ Hay **{smp} pedidos PENDIENTE** en OPERACION DIARIA que no existen en ninguna planilla fuente. "
+                    "Son candidatos a borrar (probablemente residuos o importaciones viejas)."
+                )
+
         # Detalle de los pedidos fuera de drivin
         fuera = [p for p in pedidos_ruta if not p.get("en_drivin")]
         if fuera:

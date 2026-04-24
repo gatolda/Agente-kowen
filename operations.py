@@ -768,6 +768,257 @@ def sync_operacion_con_drivin(fecha=None, dry_run=True):
     return resultado
 
 
+def leer_planilla_kowen_pedidos(fecha=None):
+    """
+    Lee y parsea los pedidos de Planilla Kowen (PRIMER TURNO) para una fecha.
+    Solo lee — NO escribe nada en OPERACION DIARIA.
+
+    Returns:
+        Lista de pedidos dict con {direccion, depto, comuna, cant, marca, estado_pedido, cliente}
+    """
+    if not fecha:
+        fecha = config.now().strftime("%d/%m/%Y")
+
+    service = _get_service()
+    result = service.spreadsheets().values().get(
+        spreadsheetId=PLANILLA_REPARTO_ID,
+        range="'PRIMER TURNO'!A:N",
+    ).execute()
+    rows = result.get("values", [])
+
+    pedidos = []
+    for row in rows[2:]:
+        if len(row) < 2:
+            continue
+        row_fecha = row[0].strip() if row[0] else ""
+        row_dir = row[1].strip() if len(row) > 1 else ""
+
+        if row_fecha != fecha:
+            continue
+        if not row_dir or row_dir == "DIRECCION":
+            continue
+
+        direccion = row_dir
+        depto = ""
+        for sep in [" Dep/Ofi. ", " dpto ", " Dpto ", " OF ", " Of ", " piso "]:
+            if sep in direccion:
+                parts = direccion.split(sep, 1)
+                direccion = parts[0].strip()
+                depto = parts[1].strip()
+                break
+        comuna = ""
+        if "," in direccion:
+            parts = direccion.rsplit(",", 1)
+            direccion = parts[0].strip()
+            comuna = parts[1].strip()
+
+        estado_raw = row[3].strip() if len(row) > 3 else ""
+        nombre = row[6].strip() if len(row) > 6 else ""
+        cantidad = row[7].strip() if len(row) > 7 else "0"
+        marca_raw = row[8].strip() if len(row) > 8 else "KOWEN"
+        marca = marca_raw.upper() if marca_raw else "KOWEN"
+        if marca in ("BERNARDINO", "PURAGUA IVAN", "PULMAHUE"):
+            marca = "KOWEN"
+
+        estado_map = {
+            "ENTREGADO": "ENTREGADO", "PENDIENTE": "PENDIENTE",
+            "EN CAMINO": "EN CAMINO", "2a Vuelta": "PENDIENTE",
+            "3a Vuelta": "PENDIENTE", "NO ENTREGADO": "NO ENTREGADO",
+            "---------------": "PENDIENTE",
+        }
+        estado = estado_map.get(estado_raw, "PENDIENTE")
+
+        pedidos.append({
+            "direccion": direccion, "depto": depto, "comuna": comuna,
+            "cant": cantidad, "marca": marca,
+            "estado_pedido": estado, "cliente": nombre,
+        })
+    return pedidos
+
+
+def leer_planilla_cactus_pedidos(fecha=None):
+    """Lee y parsea pedidos de Planilla Cactus para una fecha. Solo lee."""
+    if not fecha:
+        fecha = config.now().strftime("%d/%m/%Y")
+
+    service = _get_service()
+    try:
+        result = service.spreadsheets().values().get(
+            spreadsheetId=PLANILLA_CACTUS_ID,
+            range="'Enero 2023'!A:M",
+        ).execute()
+    except Exception as e:
+        log.warning("Fallo leer planilla Cactus: %s", e)
+        return []
+    rows = result.get("values", [])
+    if not rows:
+        return []
+
+    header_idx = None
+    for i, row in enumerate(rows):
+        if not row:
+            continue
+        if str(row[0]).strip() == fecha:
+            header_idx = i
+            break
+    if header_idx is None:
+        return []
+
+    pedidos = []
+    for row in rows[header_idx + 1:]:
+        if not row or len(row) < 2:
+            continue
+        cell_b = str(row[1]).strip() if len(row) > 1 else ""
+        if cell_b.startswith("CARGA ") or cell_b in ("TOTAL CARGAS", "CARGA DISPONIBLE"):
+            break
+        if not cell_b or cell_b == "#N/A" or cell_b == "Direccion":
+            continue
+
+        direccion = cell_b
+        comuna = str(row[2]).strip() if len(row) > 2 else ""
+        if comuna == "#N/A":
+            comuna = ""
+        nombre = str(row[3]).strip() if len(row) > 3 else ""
+        if nombre == "#N/A":
+            nombre = ""
+        estado_raw = str(row[5]).strip() if len(row) > 5 else "PENDIENTE"
+        cantidad = str(row[6]).strip() if len(row) > 6 else "0"
+
+        depto = ""
+        for sep in ["depto ", "Dpto ", "Depto ", " dp ", " OF ", " Of ", " of ", " piso "]:
+            lower_dir = direccion.lower()
+            lower_sep = sep.lower()
+            idx = lower_dir.find(lower_sep)
+            if idx >= 0:
+                depto = direccion[idx + len(sep):].strip()
+                direccion = direccion[:idx].strip()
+                break
+        if not comuna and "," in direccion:
+            parts = direccion.rsplit(",", 1)
+            direccion = parts[0].strip()
+            comuna = parts[1].strip()
+
+        estado_map = {
+            "ENTREGADO": "ENTREGADO", "PENDIENTE": "PENDIENTE",
+            "EN CAMINO": "EN CAMINO", "2DA VUELTA": "PENDIENTE",
+            "3RA VUELTA": "PENDIENTE", "NO ENTREGADO": "NO ENTREGADO",
+        }
+        estado = estado_map.get(estado_raw.upper(), "PENDIENTE")
+
+        if not cantidad or cantidad == "0":
+            continue
+
+        pedidos.append({
+            "direccion": direccion, "depto": depto, "comuna": comuna,
+            "cant": cantidad, "marca": "CACTUS",
+            "estado_pedido": estado, "cliente": nombre,
+        })
+    return pedidos
+
+
+def diagnostico_vs_planillas(fecha=None):
+    """
+    Compara OPERACION DIARIA vs Planillas Kowen y Cactus para una fecha.
+    Solo lectura. Útil para entender desfases y decidir qué borrar/agregar.
+
+    Returns dict con:
+      - fecha
+      - en_operacion: [list de pedidos OPERACION DIARIA]
+      - en_planilla_kowen: [list]
+      - en_planilla_cactus: [list]
+      - matcheados: OPERACION DIARIA que matchean con alguna planilla (dir+depto)
+      - sin_match: OPERACION DIARIA sin match en ninguna planilla
+          subdividido por: historico (entregado/pagado/no_entregado) y pendientes
+      - faltantes_planilla: pedidos en planillas SIN reflejo en OPERACION DIARIA
+      - stats con conteos de pedidos y botellones
+    """
+    from collections import Counter
+
+    if not fecha:
+        fecha = config.now().strftime("%d/%m/%Y")
+
+    op_pedidos = get_pedidos(fecha)
+    kowen = leer_planilla_kowen_pedidos(fecha)
+    cactus = leer_planilla_cactus_pedidos(fecha)
+
+    def _key(dirn, depto):
+        return (_normalize_address(dirn), unidecode(depto or "").lower().strip())
+
+    # Conteo por key en cada planilla (puede haber mismo addr con 2 pedidos)
+    kowen_counts = Counter(_key(p["direccion"], p["depto"]) for p in kowen)
+    cactus_counts = Counter(_key(p["direccion"], p["depto"]) for p in cactus)
+
+    matcheados_kowen = []
+    matcheados_cactus = []
+    sin_match_historico = []
+    sin_match_pendientes = []
+
+    # Para consumir cuotas de planilla mientras iteramos op_pedidos
+    kowen_left = dict(kowen_counts)
+    cactus_left = dict(cactus_counts)
+
+    for p in op_pedidos:
+        k = _key(p.get("Direccion", ""), p.get("Depto", ""))
+        estado = (p.get("Estado Pedido", "") or "").upper().strip()
+        pago = (p.get("Estado Pago", "") or "").upper().strip()
+        es_historico = estado in ("ENTREGADO", "NO ENTREGADO") or pago == "PAGADO"
+
+        if kowen_left.get(k, 0) > 0:
+            matcheados_kowen.append(p)
+            kowen_left[k] -= 1
+            continue
+        if cactus_left.get(k, 0) > 0:
+            matcheados_cactus.append(p)
+            cactus_left[k] -= 1
+            continue
+        # Sin match
+        if es_historico:
+            sin_match_historico.append(p)
+        else:
+            sin_match_pendientes.append(p)
+
+    # Faltantes en planillas (lo que quedó en kowen_left / cactus_left > 0)
+    faltantes_kowen = []
+    for p in kowen:
+        k = _key(p["direccion"], p["depto"])
+        if kowen_left.get(k, 0) > 0:
+            faltantes_kowen.append(p)
+            kowen_left[k] -= 1
+    faltantes_cactus = []
+    for p in cactus:
+        k = _key(p["direccion"], p["depto"])
+        if cactus_left.get(k, 0) > 0:
+            faltantes_cactus.append(p)
+            cactus_left[k] -= 1
+
+    def _bot(lst, key_cant="Cant"):
+        tot = 0
+        for p in lst:
+            try:
+                tot += int(str(p.get(key_cant, 0) or 0).strip() or 0)
+            except (ValueError, TypeError):
+                pass
+        return tot
+
+    return {
+        "fecha": fecha,
+        "total_operacion": len(op_pedidos),
+        "total_kowen": len(kowen),
+        "total_cactus": len(cactus),
+        "bot_operacion": _bot(op_pedidos, "Cant"),
+        "bot_kowen": sum(int(str(p.get("cant", 0) or 0).strip() or 0) for p in kowen
+                         if str(p.get("cant", "")).strip().isdigit()),
+        "bot_cactus": sum(int(str(p.get("cant", 0) or 0).strip() or 0) for p in cactus
+                          if str(p.get("cant", "")).strip().isdigit()),
+        "matcheados_kowen": matcheados_kowen,
+        "matcheados_cactus": matcheados_cactus,
+        "sin_match_historico": sin_match_historico,
+        "sin_match_pendientes": sin_match_pendientes,
+        "faltantes_kowen": faltantes_kowen,
+        "faltantes_cactus": faltantes_cactus,
+    }
+
+
 def sync_from_bsale(orders, fecha_destino=None):
     """
     Importa pedidos de Bsale a OPERACION DIARIA evitando duplicados.
