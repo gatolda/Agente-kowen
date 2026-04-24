@@ -1117,7 +1117,37 @@ with tab_op:
             )
 
             if dp['sin_match_pendientes']:
-                with st.expander(f"🗑 Ver los {smp} pendientes sin match en planilla", expanded=False):
+                # Boton masivo para eliminar todos de golpe
+                bulk_cols = st.columns([3, 2])
+                with bulk_cols[0]:
+                    st.warning(
+                        f"⚠️ Hay **{smp} pedidos PENDIENTE** sin match en ninguna planilla. "
+                        "Si sabés que son todos residuales, podés borrarlos todos de una."
+                    )
+                with bulk_cols[1]:
+                    conf_key = f"conf_del_all_smp_{len(dp['sin_match_pendientes'])}"
+                    confirm_all = st.checkbox(
+                        f"Sí, eliminar los {smp}",
+                        key=conf_key,
+                    )
+                    if st.button(f"🗑 Eliminar los {smp}",
+                                 key="btn_del_all_smp",
+                                 type="primary",
+                                 use_container_width=True,
+                                 disabled=not confirm_all):
+                        with st.spinner(f"Borrando {smp} pedidos..."):
+                            try:
+                                nros = [str(p.get("#", "")).strip()
+                                        for p in dp['sin_match_pendientes']
+                                        if str(p.get("#", "")).strip().isdigit()]
+                                borrados = sheets_client.delete_pedidos_batch(nros)
+                                st.success(f"✓ {borrados} pedidos eliminados")
+                                st.session_state.pop("_diag_planillas", None)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+
+                with st.expander(f"🗑 O revisar uno por uno ({smp})", expanded=False):
                     st.caption("Cada uno tiene un botón 🗑 para eliminarlo individualmente.")
                     # Header
                     hc = st.columns([0.6, 1.8, 2.2, 1.2, 0.5, 0.9, 1, 0.7])
