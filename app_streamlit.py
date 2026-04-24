@@ -1260,11 +1260,34 @@ with tab_op:
             )
 
             if plan["a_borrar"]:
-                with st.expander(f"🗑 Ver los {len(plan['a_borrar'])} que se borrarían", expanded=False):
+                with st.expander(f"🗑 Ver los {len(plan['a_borrar'])} que se borrarían — desglose por origen", expanded=False):
+                    # Breakdown por canal + fecha original (para entender de dónde vienen)
+                    from collections import Counter
+                    by_canal = Counter((p.get("Canal", "") or "(sin canal)") for p in plan["a_borrar"])
+                    fechas_originales = Counter((p.get("Fecha", "") or "(sin fecha)") for p in plan["a_borrar"])
+                    sin_codigo = sum(1 for p in plan["a_borrar"] if not (p.get("Codigo Drivin", "") or "").strip())
+                    con_bsale = sum(1 for p in plan["a_borrar"] if (p.get("Pedido Bsale", "") or "").strip())
+
+                    st.markdown("**Desglose:**")
+                    partes = [f"`{k}`: **{v}**" for k, v in by_canal.most_common()]
+                    st.caption("Por canal → " + " · ".join(partes))
+                    st.caption(f"Con pedido Bsale asociado: **{con_bsale}** · Sin código drivin: **{sin_codigo}**")
+                    if len(fechas_originales) > 1:
+                        partes_f = [f"`{k}`: {v}" for k, v in sorted(fechas_originales.items())]
+                        st.caption("Fechas originales → " + " · ".join(partes_f))
+
+                    st.markdown("")
                     df_b = pd.DataFrame([
-                        {"#": p.get("#", ""), "Cliente": p.get("Cliente", "") or "—",
-                         "Dirección": p.get("Direccion", ""), "Comuna": p.get("Comuna", ""),
-                         "Código": p.get("Codigo Drivin", "") or "(sin código)",
+                        {"#": p.get("#", ""),
+                         "Fecha orig.": p.get("Fecha", ""),
+                         "Canal": p.get("Canal", "") or "(sin canal)",
+                         "Cliente": p.get("Cliente", "") or "—",
+                         "Dirección": p.get("Direccion", ""),
+                         "Comuna": p.get("Comuna", ""),
+                         "Cant": p.get("Cant", ""),
+                         "Marca": p.get("Marca", ""),
+                         "Código": p.get("Codigo Drivin", "") or "—",
+                         "Bsale": p.get("Pedido Bsale", "") or "—",
                          "Estado": p.get("Estado Pedido", "")}
                         for p in plan["a_borrar"]
                     ])
