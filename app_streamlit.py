@@ -1306,8 +1306,24 @@ with tab_op:
                 "asignar de golpe con el botón grande. Los ambiguos o sin match se resuelven fila por fila."
             )
 
-            # Precomputar sugerencias (cache en session para no recalcular al cada rerun)
+            # Boton para refrescar cache de direcciones drivin y re-calcular sugerencias
             sin_cod_key = f"_sin_cod_sug_{op_fecha_str}"
+            if st.button("🔄 Refrescar direcciones drivin y volver a buscar códigos",
+                         key="btn_refresh_addr",
+                         use_container_width=True,
+                         help="Baja el listado actualizado de direcciones de drivin (por si agregaron nuevas) y vuelve a correr el matcher."):
+                with st.spinner("Refrescando direcciones desde drivin..."):
+                    try:
+                        import address_matcher as _am
+                        _am.refresh_cache()
+                        # Invalidar cache de sugerencias para recalcular
+                        st.session_state.pop(sin_cod_key, None)
+                        st.success("✓ Cache de direcciones actualizado. Sugerencias re-calculadas.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+            # Precomputar sugerencias (cache en session para no recalcular al cada rerun)
             if (sin_cod_key not in st.session_state
                     or len(st.session_state[sin_cod_key]) != len(diag["pendientes_sin_codigo"])):
                 import address_matcher as _am
