@@ -1440,22 +1440,14 @@ def _sync_from_planilla_cactus_impl(fecha=None):
             vuelta = "3a"
 
         # Pago
+        # IMPORTANTE: en planilla Cactus el monto en col J es el PRECIO ESPERADO,
+        # no un pago real confirmado. A diferencia de Kowen, Cactus NO marca pagado
+        # al importar. El cobro se confirma manualmente desde el dashboard (popover
+        # Cobrar) cuando efectivamente llega el pago.
         efectivo = ""
         transferencia = ""
         forma_pago = ""
         estado_pago = "PENDIENTE"
-        pago_raw = str(row[9]).strip() if len(row) > 9 else ""
-        forma_pago_raw = str(row[10]).strip() if len(row) > 10 else ""
-
-        if pago_raw and pago_raw not in ("", "$0", "0"):
-            if "TRANS" in forma_pago_raw.upper():
-                transferencia = pago_raw
-                forma_pago = "Transferencia"
-                estado_pago = "PAGADO"
-            elif "EFECT" in forma_pago_raw.upper():
-                efectivo = pago_raw
-                forma_pago = "Efectivo"
-                estado_pago = "PAGADO"
 
         if not cantidad or cantidad == "0":
             continue
