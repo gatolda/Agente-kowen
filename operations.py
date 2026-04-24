@@ -1985,17 +1985,32 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
             )
         tramo_inicio = tramo_fin + timedelta(days=1)
 
-    # Indexar PODs SOLO por address_code (codigo drivin).
-    # IMPORTANTE: no indexamos por direccion porque genera falsos positivos —
-    # dos clientes distintos con misma calle/numero pero distinto dpto/piso
-    # tienen el mismo address_1 normalizado. Si matcheamos por direccion,
-    # marcamos como ENTREGADO pedidos residuales que nada tienen que ver
-    # con el POD real. Solo codigo drivin es identificador unico.
-    pods_by_code = {}
+    # Indexar PODs SOLO por address_code (codigo drivin), pero agrupando
+    # por (codigo, fecha_pod) para evitar matchear pedido de hoy con POD
+    # de ayer. El mismo cliente puede tener varios PODs en dias distintos
+    # (ej: Martin de Zamora rechazado ayer + intento hoy = 2 PODs con
+    # mismo code). Si matcheamos por code solo, el pedido de hoy toma el
+    # POD de ayer rechazado = falso NO ENTREGADO.
+    #
+    # IMPORTANTE: no indexamos por direccion (falsos positivos: dos
+    # clientes distintos con misma calle comparten address_1 normalizado).
+    pods_by_code_fecha = {}  # (code, "YYYY-MM-DD") -> pod
     for pod in all_pods:
-        addr_code = pod.get("address_code", "")
-        if addr_code:
-            pods_by_code[addr_code] = pod
+        addr_code = pod.get("address_code", "") or ""
+        if not addr_code:
+            continue
+        # Extraer fecha del POD (proof_of_delivery_at o delivered_at del
+        # primer order, o fallback al campo 'date' del POD)
+        pod_fecha = ""
+        for o in pod.get("orders", []) or []:
+            ts = o.get("proof_of_delivery_at") or o.get("delivered_at") or ""
+            if ts:
+                pod_fecha = str(ts)[:10]  # YYYY-MM-DD
+                break
+        if not pod_fecha:
+            pod_fecha = str(pod.get("date", ""))[:10]
+        if pod_fecha:
+            pods_by_code_fecha[(addr_code, pod_fecha)] = pod
 
     estado_map = DRIVIN_STATUS_MAP
 
@@ -2013,10 +2028,24 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
         direccion = p.get("Direccion", "")
         estado_actual = p.get("Estado Pedido", "")
 
-        # Buscar POD SOLO por codigo drivin (no por direccion — genera falsos
-        # positivos). Los pedidos sin codigo drivin asignado no se actualizan
-        # automaticamente; deben recibir codigo primero.
-        pod = pods_by_code.get(codigo) if codigo else None
+        # Buscar POD SOLO por (codigo drivin, fecha del pedido). Si el pedido
+        # es del 24/04, solo matchea POD del 24/04 o posterior — NO POD de
+        # ayer. Esto evita el caso Martin de Zamora: rejected ayer y movido
+        # a hoy marcaba otra vez NO ENTREGADO incorrectamente.
+        pod = None
+        if codigo and fecha_pedido:
+            # Convertir fecha del pedido DD/MM/YYYY -> YYYY-MM-DD
+            try:
+                fp = fecha_pedido.split("/")
+                fecha_pedido_iso = f"{fp[2]}-{fp[1].zfill(2)}-{fp[0].zfill(2)}"
+            except (IndexError, ValueError):
+                fecha_pedido_iso = ""
+            if fecha_pedido_iso:
+                # Buscar POD cuya fecha sea >= fecha del pedido
+                for (c, f_pod), p_pod in pods_by_code_fecha.items():
+                    if c == codigo and f_pod >= fecha_pedido_iso:
+                        pod = p_pod
+                        break
 
         nuevo_estado = None
         driver = None
