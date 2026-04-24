@@ -1395,9 +1395,35 @@ with tab_op:
                             except Exception as e:
                                 st.error(f"Error: {e}")
 
+            # Cache de addresses de drivin para búsqueda (se calcula 1 vez)
+            if "_drivin_addr_options" not in st.session_state:
+                try:
+                    import address_matcher as _am_cache
+                    _addrs = _am_cache.load_cache() or []
+                    # Tupla (label para mostrar, code)
+                    opciones = []
+                    for a in _addrs:
+                        code = a.get("code", "") if isinstance(a, dict) else getattr(a, "code", "")
+                        name = a.get("name", "") if isinstance(a, dict) else getattr(a, "name", "")
+                        addr = a.get("address1", "") if isinstance(a, dict) else getattr(a, "address1", "")
+                        city = a.get("city", "") if isinstance(a, dict) else getattr(a, "city", "")
+                        if code:
+                            label = f"{code} · {addr or name} ({city})"
+                            opciones.append((label, code))
+                    opciones.sort(key=lambda x: x[0])
+                    st.session_state["_drivin_addr_options"] = opciones
+                except Exception:
+                    st.session_state["_drivin_addr_options"] = []
+
+            drivin_opciones = st.session_state["_drivin_addr_options"]
+
             # Fila por fila — para los que necesitan revisión manual
             st.markdown("")
             with st.expander(f"Ver lista detallada ({len(sin_cod_list)})", expanded=False):
+                st.caption(
+                    f"📚 Base drivin: {len(drivin_opciones)} direcciones disponibles para buscar. "
+                    "Escribí parte del código o dirección en el buscador de cada fila."
+                )
                 for i, p in enumerate(sin_cod_list):
                     conf = p.get("_conf", "none")
                     codigo_sug = p.get("_codigo", "") or ""
@@ -1418,27 +1444,44 @@ with tab_op:
                         with top[1]:
                             st.caption(badge)
 
+                        # Opciones: candidatos del matcher + sugerencia + todas las de drivin
+                        labels = ["— elegir —"]
+                        codes = [""]
+                        if codigo_sug:
+                            labels.append(f"✨ Sugerencia: {codigo_sug}")
+                            codes.append(codigo_sug)
+                        for c in candidatos:
+                            lbl = f"🔎 {c.code} · {c.name} ({c.city})"
+                            labels.append(lbl)
+                            codes.append(c.code)
+                        for lbl, cd in drivin_opciones:
+                            # Evitar duplicar candidatos ya en la lista
+                            if cd not in codes:
+                                labels.append(lbl)
+                                codes.append(cd)
+                        labels.append("✏️ Escribir código manualmente...")
+                        codes.append("__MANUAL__")
+
                         inp_col = st.columns([2, 1])
                         with inp_col[0]:
-                            if conf == "ambiguous" and candidatos:
-                                opts = [f"{c.code} — {c.name} ({c.city})" for c in candidatos]
-                                opts = ["(escribir manualmente)"] + opts
-                                sel = st.selectbox("Código", opts,
-                                                    key=f"sc_sel_{i}",
-                                                    label_visibility="collapsed")
-                                if sel == opts[0]:
-                                    codigo_in = st.text_input("Manual",
-                                                              key=f"sc_man_{i}",
-                                                              label_visibility="collapsed",
-                                                              placeholder="Escribir código drivin")
-                                else:
-                                    codigo_in = candidatos[opts.index(sel) - 1].code
+                            sel_idx = st.selectbox(
+                                f"Código drivin (buscá por código/dirección)",
+                                options=list(range(len(labels))),
+                                format_func=lambda x: labels[x],
+                                key=f"sc_sel2_{i}",
+                                label_visibility="collapsed",
+                            )
+                            if codes[sel_idx] == "__MANUAL__":
+                                codigo_in = st.text_input(
+                                    "Escribir código",
+                                    key=f"sc_man2_{i}",
+                                    label_visibility="collapsed",
+                                    placeholder="Código drivin exacto",
+                                )
+                            elif codes[sel_idx]:
+                                codigo_in = codes[sel_idx]
                             else:
-                                codigo_in = st.text_input("Código drivin",
-                                                          value=codigo_sug,
-                                                          key=f"sc_code_{i}",
-                                                          label_visibility="collapsed",
-                                                          placeholder="Escribir código drivin")
+                                codigo_in = ""
                         with inp_col[1]:
                             if st.button("✓ Asignar", key=f"sc_btn_{i}",
                                          use_container_width=True,
