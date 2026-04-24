@@ -983,6 +983,58 @@ with tab_op:
         else:
             st.info(f"Sin plan driv.in asociado a {op_fecha_str}.")
 
+        # --- Diagnostico por fuente (canal + marca) ---
+        st.markdown("---")
+        st.markdown("##### 🔍 Diagnóstico de fuentes (breakdown del día)")
+        st.caption("Te muestra de dónde viene cada pedido — útil para identificar desfases con las planillas Kowen/Cactus.")
+
+        def _cant_of(p):
+            try:
+                return int(str(p.get("cantidad", 0) or 0).strip() or 0)
+            except (ValueError, TypeError):
+                return 0
+
+        # Breakdown por canal (pedidos + botellones)
+        by_canal = {}
+        for p in pedidos_ruta:
+            c = (p.get("canal") or "—").strip() or "(sin canal)"
+            by_canal.setdefault(c, {"pedidos": 0, "botellones": 0})
+            by_canal[c]["pedidos"] += 1
+            by_canal[c]["botellones"] += _cant_of(p)
+
+        # Breakdown por marca
+        by_marca = {}
+        for p in pedidos_ruta:
+            m = (p.get("marca") or "—").strip().upper() or "—"
+            by_marca.setdefault(m, {"pedidos": 0, "botellones": 0})
+            by_marca[m]["pedidos"] += 1
+            by_marca[m]["botellones"] += _cant_of(p)
+
+        cd1, cd2 = st.columns(2)
+        with cd1:
+            st.markdown("**Por canal**")
+            df_c = pd.DataFrame([
+                {"Canal": k, "Pedidos": v["pedidos"], "Botellones": v["botellones"]}
+                for k, v in sorted(by_canal.items(), key=lambda x: -x[1]["botellones"])
+            ])
+            st.dataframe(df_c, use_container_width=True, hide_index=True)
+
+        with cd2:
+            st.markdown("**Por marca**")
+            df_m = pd.DataFrame([
+                {"Marca": k, "Pedidos": v["pedidos"], "Botellones": v["botellones"]}
+                for k, v in sorted(by_marca.items(), key=lambda x: -x[1]["botellones"])
+            ])
+            st.dataframe(df_m, use_container_width=True, hide_index=True)
+
+        total_bot = sum(v["botellones"] for v in by_canal.values())
+        total_drivin_bot = sum(_cant_of(p) for p in pedidos_ruta if p.get("en_drivin"))
+        st.caption(
+            f"**Total OPERACION DIARIA:** {len(pedidos_ruta)} pedidos · {total_bot} botellones  ·  "
+            f"**En drivin:** {total_drivin_bot} botellones  ·  "
+            f"**Fuera de drivin:** {total_bot - total_drivin_bot}"
+        )
+
         # Planes sin despachar (consulta bajo demanda)
         st.markdown("---")
         if st.button("🔍 Verificar planes sin despachar en driv.in", key="btn_plan_chk", use_container_width=True):
