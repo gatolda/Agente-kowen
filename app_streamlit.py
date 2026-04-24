@@ -1267,13 +1267,126 @@ with tab_op:
             else:
                 st.success("Todos los planes iniciados.")
 
-        # Pedidos sin codigo driv.in
+        # Pedidos sin codigo driv.in — lista interactiva con sugerencias
         if diag and diag["pendientes_sin_codigo"]:
             st.markdown("---")
-            st.markdown(f"##### 🔖 Pendientes sin código driv.in ({len(diag['pendientes_sin_codigo'])})")
-            df_s = pd.DataFrame(diag["pendientes_sin_codigo"])
-            st.dataframe(df_s[["numero", "fecha", "direccion", "comuna"]],
-                         use_container_width=True, hide_index=True)
+            st.markdown(f"##### 🔖 Pendientes sin código drivin ({len(diag['pendientes_sin_codigo'])})")
+            st.caption(
+                "Cada pedido tiene su sugerencia del matcher. Los que tienen match auto/memory se pueden "
+                "asignar de golpe con el botón grande. Los ambiguos o sin match se resuelven fila por fila."
+            )
+
+            # Precomputar sugerencias (cache en session para no recalcular al cada rerun)
+            sin_cod_key = f"_sin_cod_sug_{op_fecha_str}"
+            if (sin_cod_key not in st.session_state
+                    or len(st.session_state[sin_cod_key]) != len(diag["pendientes_sin_codigo"])):
+                import address_matcher as _am
+                addrs_cache = _am.load_cache()
+                enriched_sc = []
+                for p in diag["pendientes_sin_codigo"]:
+                    res, conf = _am.auto_match(
+                        direccion=p.get("direccion", ""),
+                        depto=p.get("depto", ""),
+                        comuna=p.get("comuna", ""),
+                        addresses=addrs_cache,
+                    )
+                    candidatos = res if conf == "ambiguous" else []
+                    codigo = res if conf in ("auto", "memory") else ""
+                    enriched_sc.append({**p, "_conf": conf, "_codigo": codigo, "_cand": candidatos})
+                st.session_state[sin_cod_key] = enriched_sc
+
+            sin_cod_list = st.session_state[sin_cod_key]
+            auto_asignables = [p for p in sin_cod_list if p["_conf"] in ("auto", "memory")]
+
+            if auto_asignables:
+                bc1, bc2 = st.columns([2, 1])
+                with bc1:
+                    st.info(
+                        f"✨ **{len(auto_asignables)} pedidos** tienen match automático de alta confianza. "
+                        "Podés asignarlos todos de una vez."
+                    )
+                with bc2:
+                    if st.button(f"⚡ Asignar {len(auto_asignables)} códigos auto",
+                                 key="btn_assign_auto",
+                                 type="primary",
+                                 use_container_width=True):
+                        with st.spinner("Asignando códigos..."):
+                            try:
+                                updates = []
+                                for p in auto_asignables:
+                                    nro = int(str(p.get("numero", "")).strip())
+                                    updates.append((nro, {"codigo_drivin": p["_codigo"]}))
+                                if updates:
+                                    sheets_client.update_pedidos_batch(updates)
+                                st.success(f"✓ {len(updates)} códigos asignados. Ahora ejecutá 'Rutina AHORA' para subirlos al plan drivin.")
+                                st.session_state.pop(sin_cod_key, None)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+
+            # Fila por fila — para los que necesitan revisión manual
+            st.markdown("")
+            with st.expander(f"Ver lista detallada ({len(sin_cod_list)})", expanded=False):
+                for i, p in enumerate(sin_cod_list):
+                    conf = p.get("_conf", "none")
+                    codigo_sug = p.get("_codigo", "") or ""
+                    candidatos = p.get("_cand", []) or []
+                    badge = {"auto": "✅ auto", "memory": "🧠 memoria",
+                             "ambiguous": "⚠️ elegir", "none": "❓ sin match"}.get(conf, "❓")
+
+                    with st.container(border=True):
+                        top = st.columns([3, 1])
+                        with top[0]:
+                            st.markdown(f"**#{p.get('numero', '?')}** · {p.get('cliente', '') or '—'}")
+                            dir_str = p.get("direccion", "")
+                            if p.get("depto"):
+                                dir_str += f", {p['depto']}"
+                            if p.get("comuna"):
+                                dir_str += f"  ·  {p['comuna']}"
+                            st.caption(dir_str)
+                        with top[1]:
+                            st.caption(badge)
+
+                        inp_col = st.columns([2, 1])
+                        with inp_col[0]:
+                            if conf == "ambiguous" and candidatos:
+                                opts = [f"{c.code} — {c.name} ({c.city})" for c in candidatos]
+                                opts = ["(escribir manualmente)"] + opts
+                                sel = st.selectbox("Código", opts,
+                                                    key=f"sc_sel_{i}",
+                                                    label_visibility="collapsed")
+                                if sel == opts[0]:
+                                    codigo_in = st.text_input("Manual",
+                                                              key=f"sc_man_{i}",
+                                                              label_visibility="collapsed",
+                                                              placeholder="Escribir código drivin")
+                                else:
+                                    codigo_in = candidatos[opts.index(sel) - 1].code
+                            else:
+                                codigo_in = st.text_input("Código drivin",
+                                                          value=codigo_sug,
+                                                          key=f"sc_code_{i}",
+                                                          label_visibility="collapsed",
+                                                          placeholder="Escribir código drivin")
+                        with inp_col[1]:
+                            if st.button("✓ Asignar", key=f"sc_btn_{i}",
+                                         use_container_width=True,
+                                         disabled=not codigo_in):
+                                try:
+                                    nro = int(str(p.get("numero", "")).strip())
+                                    sheets_client.update_pedido(nro, {"codigo_drivin": codigo_in.strip()})
+                                    # Si el match era ambiguo o manual, guardar aprendizaje
+                                    if conf in ("ambiguous", "none"):
+                                        try:
+                                            import address_matcher as _am
+                                            _am.save_memory_entry(p.get("direccion", ""), codigo_in.strip())
+                                        except Exception:
+                                            pass
+                                    st.success(f"#{nro} ← {codigo_in.strip()}")
+                                    st.session_state.pop(sin_cod_key, None)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error: {e}")
 
         # --- Sincronizacion con drivin (Opcion C selectiva) ---
         st.markdown("---")
