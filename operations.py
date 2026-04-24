@@ -2040,6 +2040,7 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
         # ayer. Esto evita el caso Martin de Zamora: rejected ayer y movido
         # a hoy marcaba otra vez NO ENTREGADO incorrectamente.
         pod = None
+        fecha_pedido_iso = ""
         if codigo and fecha_pedido:
             # Convertir fecha del pedido DD/MM/YYYY -> YYYY-MM-DD
             try:
@@ -2053,6 +2054,19 @@ def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):
                     if c == codigo and f_pod >= fecha_pedido_iso:
                         pod = p_pod
                         break
+
+        # Debug: si el pedido tiene código pero no encontró POD, loggear
+        if codigo and not pod:
+            # Buscar si el código está en algún POD (cualquier fecha)
+            fechas_del_code = [
+                f for (c, f), _ in pods_by_code_fecha.items() if c == codigo
+            ]
+            if fechas_del_code:
+                log.info(
+                    "verify #%s code=%r: POD(s) existe(n) en fechas %s pero "
+                    "ninguna es >= fecha_pedido %s",
+                    nro_int, codigo, fechas_del_code, fecha_pedido_iso,
+                )
 
         nuevo_estado = None
         driver = None
