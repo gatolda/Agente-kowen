@@ -1306,22 +1306,47 @@ with tab_op:
                 "asignar de golpe con el botón grande. Los ambiguos o sin match se resuelven fila por fila."
             )
 
-            # Boton para refrescar cache de direcciones drivin y re-calcular sugerencias
+            # Botones para refrescar/entrenar el matcher
             sin_cod_key = f"_sin_cod_sug_{op_fecha_str}"
-            if st.button("🔄 Refrescar direcciones drivin y volver a buscar códigos",
-                         key="btn_refresh_addr",
-                         use_container_width=True,
-                         help="Baja el listado actualizado de direcciones de drivin (por si agregaron nuevas) y vuelve a correr el matcher."):
-                with st.spinner("Refrescando direcciones desde drivin..."):
-                    try:
-                        import address_matcher as _am
-                        _am.refresh_cache()
-                        # Invalidar cache de sugerencias para recalcular
-                        st.session_state.pop(sin_cod_key, None)
-                        st.success("✓ Cache de direcciones actualizado. Sugerencias re-calculadas.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+
+            # Contador de memoria (cache 10 min para no leer archivo en cada rerun)
+            try:
+                import address_matcher as _am
+                mem_count = _am.count_memory()
+            except Exception:
+                mem_count = 0
+            st.caption(f"🧠 Matcher: **{mem_count} direcciones memorizadas**")
+
+            train_cols = st.columns(2)
+            with train_cols[0]:
+                if st.button("🔄 Refrescar direcciones drivin",
+                             key="btn_refresh_addr",
+                             use_container_width=True,
+                             help="Baja el listado actualizado de direcciones de drivin (por si agregaron nuevas)."):
+                    with st.spinner("Refrescando direcciones desde drivin..."):
+                        try:
+                            _am.refresh_cache()
+                            st.session_state.pop(sin_cod_key, None)
+                            st.success("✓ Cache actualizado")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+            with train_cols[1]:
+                if st.button("🧠 Entrenar matcher con histórico",
+                             key="btn_train_matcher",
+                             use_container_width=True,
+                             help="Aprende de todos los pedidos ya asignados en OPERACION DIARIA. Los próximos con la misma dirección se asignarán automáticamente."):
+                    with st.spinner("Entrenando matcher con histórico..."):
+                        try:
+                            r = operations.bootstrap_memoria_direcciones()
+                            st.session_state.pop(sin_cod_key, None)
+                            st.success(
+                                f"✓ Aprendidos: **{r['aprendidos']}** · Ya existentes: {r['ya_existentes']} · "
+                                f"Total en memoria: **{r['total_memoria']}**"
+                            )
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
 
             # Precomputar sugerencias (cache en session para no recalcular al cada rerun)
             if (sin_cod_key not in st.session_state

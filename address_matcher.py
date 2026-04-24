@@ -128,7 +128,11 @@ def save_memory_entry(direccion, code):
             "ultima_fecha": _dt.now().strftime("%d/%m/%Y"),
         }
 
-    # Escribir todo el archivo
+    _write_memory_all(memory)
+
+
+def _write_memory_all(memory):
+    """Escribe el diccionario completo de memoria al archivo CSV."""
     fieldnames = ["direccion", "code", "veces_usado", "ultima_fecha"]
     with open(MEMORY_FILE, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -140,6 +144,57 @@ def save_memory_entry(direccion, code):
                 "veces_usado": v["veces_usado"],
                 "ultima_fecha": v["ultima_fecha"],
             })
+
+
+def bulk_save_memory(entries):
+    """
+    Guarda múltiples correspondencias direccion -> code en memoria de una sola vez.
+
+    Args:
+        entries: iterable de dicts con keys 'direccion' y 'code'.
+
+    Returns:
+        Dict con {aprendidos, ya_existentes, ignorados}.
+    """
+    from datetime import datetime as _dt
+    memory = load_memory()
+    hoy = _dt.now().strftime("%d/%m/%Y")
+    aprendidos = 0
+    ya_existentes = 0
+    ignorados = 0
+
+    for e in entries:
+        direccion = (e.get("direccion", "") or "").strip()
+        code = (e.get("code", "") or "").strip()
+        if not direccion or not code:
+            ignorados += 1
+            continue
+        key = normalize(direccion)
+        if key in memory:
+            ya_existentes += 1
+            memory[key]["veces_usado"] += 1
+            # No sobreescribir code si ya existe — preservamos el histórico
+        else:
+            memory[key] = {
+                "code": code,
+                "direccion_original": direccion,
+                "veces_usado": 1,
+                "ultima_fecha": hoy,
+            }
+            aprendidos += 1
+
+    _write_memory_all(memory)
+    return {
+        "aprendidos": aprendidos,
+        "ya_existentes": ya_existentes,
+        "ignorados": ignorados,
+        "total_memoria": len(memory),
+    }
+
+
+def count_memory():
+    """Devuelve la cantidad de direcciones en memoria."""
+    return len(load_memory())
 
 
 # --- Matching ---

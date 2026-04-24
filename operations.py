@@ -2427,6 +2427,35 @@ def sync_clientes_from_operacion():
     return resultado
 
 
+def bootstrap_memoria_direcciones():
+    """
+    Entrena el matcher de direcciones con TODO el histórico de OPERACION DIARIA.
+    Por cada pedido que ya tenga código drivin asignado, guarda la correspondencia
+    dirección → código en la memoria del matcher.
+
+    Útil para arrancar desde 0 o incorporar pedidos viejos que el matcher no
+    conocía. La próxima vez que aparezca esa misma dirección en un pedido nuevo,
+    el sistema le asigna el código automáticamente (badge 🧠 memoria).
+
+    Returns:
+        Dict con {aprendidos, ya_existentes, total_pedidos, total_memoria}.
+    """
+    import address_matcher
+
+    pedidos = get_pedidos()  # todos los de OPERACION DIARIA
+    entries = []
+    for p in pedidos:
+        direccion = (p.get("Direccion", "") or "").strip()
+        codigo = (p.get("Codigo Drivin", "") or "").strip()
+        if direccion and codigo:
+            entries.append({"direccion": direccion, "code": codigo})
+
+    r = address_matcher.bulk_save_memory(entries)
+    r["total_pedidos"] = len(pedidos)
+    r["con_codigo"] = len(entries)
+    return r
+
+
 def auto_avanzar_scenario(scenario_token):
     """
     Avanza el ciclo de vida de un scenario drivin de forma idempotente.
