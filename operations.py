@@ -1838,6 +1838,204 @@ def sync_to_planilla_reparto(fecha=None):
     return count
 
 
+# ===== ASIGNAR CODIGOS DRIV.IN DESDE EL SCENARIO =====
+
+def asignar_codigos_desde_drivin(fecha=None):
+    """
+    Asigna Codigo Drivin a pedidos PENDIENTE sin codigo cruzando contra las
+    orders del scenario de drivin para esa fecha.
+
+    Estrategia: drivin es source of truth — si el pedido ya esta cargado alli,
+    tiene un address_code. Matcheamos por (direccion + depto + comuna)
+    normalizados. Mas confiable que el matcher local porque no depende de
+    memoria ni del cache de direcciones.
+
+    Args:
+        fecha: DD/MM/YYYY. None = hoy.
+
+    Returns:
+        dict con:
+          - matched: [{"numero", "direccion", "depto", "codigo_asignado"}]
+          - sin_match: [{"numero", "direccion", "depto", "comuna"}]
+          - ambiguos: [{"numero", "direccion", "depto", "candidatos": [codes]}]
+          - total_drivin: int
+          - total_sin_codigo: int
+          - scenario: str
+          - errores: [str]
+    """
+    import drivin_client
+    import sheets_client
+    from address_matcher import normalize as _norm
+
+    if not fecha:
+        fecha = config.now().strftime("%d/%m/%Y")
+
+    resultado = {
+        "fecha": fecha,
+        "matched": [],
+        "sin_match": [],
+        "ambiguos": [],
+        "total_drivin": 0,
+        "total_sin_codigo": 0,
+        "scenario": "",
+        "errores": [],
+    }
+
+    parts = fecha.split("/")
+    if len(parts) != 3:
+        resultado["errores"].append(f"Fecha invalida: {fecha}")
+        return resultado
+    api_date = f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}"
+
+    # 1. Traer scenario del dia
+    try:
+        scenarios = drivin_client.get_scenarios_by_date(api_date).get("response", []) or []
+    except Exception as e:
+        resultado["errores"].append(f"Error get_scenarios_by_date: {e}")
+        return resultado
+
+    chosen = None
+    for s in scenarios:
+        if str(s.get("description", "")).endswith("API"):
+            chosen = s
+            break
+    if not chosen and scenarios:
+        chosen = scenarios[0]
+
+    if not chosen:
+        resultado["errores"].append(f"No hay scenario en drivin para {fecha}")
+        return resultado
+
+    token = chosen.get("token") or chosen.get("scenario_token", "")
+    resultado["scenario"] = chosen.get("description", "")
+
+    try:
+        orders_drivin = drivin_client.get_orders(token).get("response", []) or []
+    except Exception as e:
+        resultado["errores"].append(f"Error get_orders: {e}")
+        return resultado
+
+    resultado["total_drivin"] = len(orders_drivin)
+
+    # 2. Construir indice de drivin: clave → code
+    # Usamos varias claves para tolerar pequeñas diferencias:
+    #   (dir_norm, depto_norm, comuna_norm) — mas estricta
+    #   (dir_norm, depto_norm) — ignora comuna
+    #   (dir_norm) — solo direccion (ultimo recurso, solo si es unica)
+    indice_estricto = {}    # (dir, depto, comuna) → [codes]
+    indice_medio = {}       # (dir, depto) → [codes]
+    indice_flexible = {}    # (dir,) → [codes]
+
+    for o in orders_drivin:
+        code = (o.get("code", "") or "").strip()
+        if not code:
+            continue
+        dir_n = _norm(o.get("address_1", "") or "")
+        depto_n = _norm(o.get("address_2", "") or "")
+        comuna_n = _norm(o.get("area_level_3", "") or "")
+        if not dir_n:
+            continue
+        indice_estricto.setdefault((dir_n, depto_n, comuna_n), []).append(code)
+        indice_medio.setdefault((dir_n, depto_n), []).append(code)
+        indice_flexible.setdefault(dir_n, []).append(code)
+
+    # 3. Leer pedidos de la planilla para la fecha, sin codigo, en estado PENDIENTE
+    pedidos_fecha = get_pedidos(fecha)
+    sin_codigo = []
+    for p in pedidos_fecha:
+        nro = p.get("#", "")
+        if not nro or not str(nro).isdigit():
+            continue
+        if (p.get("Codigo Drivin", "") or "").strip():
+            continue
+        estado = (p.get("Estado Pedido", "") or "").upper().strip()
+        # Solo pedidos activos — no tocar entregados/no entregados
+        if estado not in ("", "PENDIENTE", "EN CAMINO"):
+            continue
+        sin_codigo.append(p)
+
+    resultado["total_sin_codigo"] = len(sin_codigo)
+
+    # 4. Matchear y preparar updates
+    updates = []
+    for p in sin_codigo:
+        nro = int(str(p.get("#", "")).strip())
+        dir_raw = p.get("Direccion", "") or ""
+        depto_raw = p.get("Depto", "") or ""
+        comuna_raw = p.get("Comuna", "") or ""
+
+        dir_n = _norm(dir_raw)
+        depto_n = _norm(depto_raw)
+        comuna_n = _norm(comuna_raw)
+
+        # Intento 1: match estricto (dir + depto + comuna)
+        candidatos = indice_estricto.get((dir_n, depto_n, comuna_n), [])
+        # Intento 2: sin comuna
+        if not candidatos:
+            candidatos = indice_medio.get((dir_n, depto_n), [])
+        # Intento 3: solo direccion (riesgoso, solo si es UNICA en drivin)
+        if not candidatos:
+            flex = indice_flexible.get(dir_n, [])
+            if len(flex) == 1:
+                candidatos = flex
+            elif len(flex) > 1:
+                # Ambiguo — hay varias direcciones iguales con distintos deptos
+                resultado["ambiguos"].append({
+                    "numero": nro,
+                    "direccion": dir_raw,
+                    "depto": depto_raw,
+                    "comuna": comuna_raw,
+                    "candidatos": list(set(flex)),
+                })
+                continue
+
+        # Deduplicar candidatos
+        candidatos = list(set(candidatos))
+
+        if len(candidatos) == 1:
+            codigo = candidatos[0]
+            updates.append((nro, {"codigo_drivin": codigo}))
+            resultado["matched"].append({
+                "numero": nro,
+                "direccion": dir_raw,
+                "depto": depto_raw,
+                "codigo_asignado": codigo,
+            })
+        elif len(candidatos) > 1:
+            resultado["ambiguos"].append({
+                "numero": nro,
+                "direccion": dir_raw,
+                "depto": depto_raw,
+                "comuna": comuna_raw,
+                "candidatos": candidatos,
+            })
+        else:
+            resultado["sin_match"].append({
+                "numero": nro,
+                "direccion": dir_raw,
+                "depto": depto_raw,
+                "comuna": comuna_raw,
+            })
+
+    # 5. Aplicar updates
+    if updates:
+        try:
+            sheets_client.update_pedidos_batch(updates)
+        except Exception as e:
+            resultado["errores"].append(f"Error update_pedidos_batch: {e}")
+            log.error("asignar_codigos_desde_drivin: fallo update_pedidos_batch: %s", e)
+
+    log.info(
+        "asignar_codigos_desde_drivin %s: scenario=%s, drivin=%d, sin_codigo=%d, "
+        "matched=%d, ambiguos=%d, sin_match=%d",
+        fecha, resultado["scenario"], resultado["total_drivin"],
+        resultado["total_sin_codigo"], len(resultado["matched"]),
+        len(resultado["ambiguos"]), len(resultado["sin_match"]),
+    )
+
+    return resultado
+
+
 # ===== VERIFICACION CONTRA DRIV.IN =====
 
 def verify_orders_drivin(fecha=None, days_back=7, auto_update=True):

@@ -1471,6 +1471,55 @@ with tab_op:
                         except Exception as e:
                             st.error(f"Error: {e}")
 
+            # --- Asignar códigos desde drivin (source of truth) ---
+            st.markdown("")
+            if st.button("⚡ Asignar códigos desde drivin",
+                         key="btn_assign_from_drivin",
+                         type="primary",
+                         use_container_width=True,
+                         help="Cruza los pedidos sin código con las orders del scenario de drivin para esta fecha. "
+                              "Si el pedido ya está en drivin, toma el código de ahí directo (sin depender del matcher local)."):
+                with st.spinner("Cruzando con scenario drivin..."):
+                    try:
+                        res = operations.asignar_codigos_desde_drivin(fecha=op_fecha_str)
+                        matched = len(res.get("matched", []))
+                        ambiguos = len(res.get("ambiguos", []))
+                        sin_match = len(res.get("sin_match", []))
+                        errores = res.get("errores", [])
+                        if errores:
+                            for err in errores:
+                                st.error(err)
+                        if matched > 0:
+                            st.success(
+                                f"✓ {matched} códigos asignados desde drivin · "
+                                f"{ambiguos} ambiguos · {sin_match} sin match"
+                            )
+                        else:
+                            st.warning(
+                                f"Ningún pedido matcheó con drivin · "
+                                f"{ambiguos} ambiguos · {sin_match} sin match · "
+                                f"drivin tiene {res.get('total_drivin', 0)} orders"
+                            )
+                        if res.get("ambiguos"):
+                            with st.expander(f"Ver {ambiguos} ambiguos"):
+                                for a in res["ambiguos"]:
+                                    st.write(
+                                        f"#{a['numero']} · {a['direccion']} · depto {a.get('depto') or '—'} → "
+                                        f"candidatos: {', '.join(a['candidatos'])}"
+                                    )
+                        if res.get("sin_match"):
+                            with st.expander(f"Ver {sin_match} sin match"):
+                                for s in res["sin_match"]:
+                                    st.write(
+                                        f"#{s['numero']} · {s['direccion']} · depto {s.get('depto') or '—'} · "
+                                        f"{s.get('comuna') or '—'}"
+                                    )
+                        st.session_state.pop(sin_cod_key, None)
+                        if matched > 0:
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
             # Precomputar sugerencias (cache en session para no recalcular al cada rerun)
             if (sin_cod_key not in st.session_state
                     or len(st.session_state[sin_cod_key]) != len(diag["pendientes_sin_codigo"])):
